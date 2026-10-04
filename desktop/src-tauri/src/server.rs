@@ -50,6 +50,14 @@ unsafe impl Send for JobHandle {}
 struct Inner {
     child: Option<Child>,
     port: u16,
+    /// The last status the shell published.
+    ///
+    /// The boot window asks for status as soon as it loads, which can be after a
+    /// fast failure has already been emitted — and an emitted event nobody was
+    /// listening for is lost. Retaining it means `boot_info` can still report
+    /// the failure instead of a synthesized "stopped" that renders as a spinner
+    /// with nothing to read.
+    last_status: Option<ServerStatus>,
     /// Windows only: the job object that guarantees the child dies with the
     /// shell even if the shell is killed rather than closed.
     #[cfg(windows)]
@@ -70,6 +78,7 @@ impl<R: Runtime> ServerHandle<R> {
             inner: std::sync::Mutex::new(Inner {
                 child: None,
                 port: launch::DEFAULT_PORT,
+                last_status: None,
                 #[cfg(windows)]
                 job: None,
             }),
@@ -85,6 +94,13 @@ impl<R: Runtime> ServerHandle<R> {
 
     pub fn status(&self) -> ServerStatus {
         let inner = self.inner.lock().unwrap();
+        // A retained failure is more useful than a synthesized "stopped": the
+        // boot page turns "stopped" with no detail into an indefinite spinner.
+        if let Some(status) = &inner.last_status {
+            if status.state == "failed" {
+                return status.clone();
+            }
+        }
         ServerStatus {
             state: if inner.child.is_some() {
                 "running"
@@ -104,8 +120,24 @@ impl<R: Runtime> ServerHandle<R> {
             url: launch::base_url(port),
             detail,
         };
+        // Retain before emitting. An event with no listener is dropped, and the
+        // boot window may not have registered yet.
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.last_status = Some(status.clone());
+        }
         let _ = self.app.emit("paperclip://server-status", status.clone());
         status
+    }
+
+    /// Record a startup failure so both the boot page and a later `boot_info`
+    /// read can see it.
+    ///
+    /// Retained as well as emitted: a startup can fail faster than the webview
+    /// registers its listener, and an event nobody received leaves the boot page
+    /// spinning forever with nothing to report.
+    pub fn fail(&self, detail: String) -> ServerStatus {
+        let port = self.inner.lock().unwrap().port;
+        self.publish("failed", port, Some(detail))
     }
 
     /// Bring the server up, or adopt one that is already listening on the
@@ -170,8 +202,18 @@ impl<R: Runtime> ServerHandle<R> {
             )
             // The shell owns the port; the server must not pick its own.
             .env("PORT", port.to_string())
-            .env("PAPERCLIP_PORT", port.to_string())
+            // Both of these, not just the host. `PAPERCLIP_BIND_HOST` alone does
+            // not hold: the server resolves `bind` from its config file first,
+            // and an instance that was onboarded with `--bind lan` keeps a `lan`
+            // value there. A desktop shell that honored it would publish
+            // Paperclip on the network the moment it started.
+            .env("PAPERCLIP_BIND", "loopback")
             .env("PAPERCLIP_BIND_HOST", "127.0.0.1")
+            // The child inherits a working directory the shell was launched
+            // from, which may not be a Paperclip checkout at all. Without this,
+            // the server would load a `.env` belonging to whatever project the
+            // user happened to start the shell from.
+            .env("PAPERCLIP_DISABLE_CWD_ENV_FILE", "true")
             .env("PAPERCLIP_MIGRATION_PROMPT", "never")
             .env("PAPERCLIP_MIGRATION_AUTO_APPLY", "true")
             .stdin(Stdio::null())
@@ -187,6 +229,19 @@ impl<R: Runtime> ServerHandle<R> {
 
         #[cfg(windows)]
         let job = attach_job(&child);
+        #[cfg(windows)]
+        if job.is_none() {
+            // AssignProcessToJobObject fails under nested-job restrictions
+            // (sandboxes, AppContainer, some CI). The child is still ours and
+            // `stop` still kills it, but killing the *shell* would no longer
+            // take the server with it, and that guarantee should not disappear
+            // silently.
+            record_shell_failure(
+                &self.log_path,
+                "warning: could not attach the server to a Windows job object. Closing the \
+                 window still stops the server, but force-quitting the shell may leave it running.",
+            );
+        }
 
         // Drain both pipes into the log file. Without draining, a chatty server
         // fills the pipe buffer and blocks forever.

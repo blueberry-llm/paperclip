@@ -206,7 +206,15 @@
         error.hidden = true;
         retry.hidden = true;
         detail.textContent = "Restarting…";
-        invoke?.("restart_server");
+        // The handler hides the error block and this button before the command
+        // runs, so a rejection has to put both back. Without this the page
+        // reads "Restarting…" forever with nothing to press.
+        Promise.resolve(invoke?.("restart_server")).catch((err) => {
+          detail.textContent = "Paperclip could not restart.";
+          error.hidden = false;
+          error.textContent = String(err?.message ?? err);
+          retry.hidden = false;
+        });
       });
 
       openLog.addEventListener("click", () => {

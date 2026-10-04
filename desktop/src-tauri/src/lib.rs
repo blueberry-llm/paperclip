@@ -16,7 +16,7 @@ mod server;
 
 use std::path::PathBuf;
 
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 use server::ServerHandle;
 
@@ -48,24 +48,14 @@ pub fn run() {
                         commands::show(&startup_handle);
                     }
                     Err(err) => {
-                        // The boot page already renders failures from the status
-                        // event; the log keeps the detail for a user who never
-                        // sees the window.
+                        // Retain the failure as well as logging it: the boot
+                        // window can load after this runs, and a status nobody
+                        // received leaves it spinning with nothing to report.
                         server::record_shell_failure(
-                            startup_handle
-                                .state::<std::sync::Arc<ServerHandle<tauri::Wry>>>()
-                                .log_path(),
+                            state.log_path(),
                             &format!("startup failed: {err}"),
                         );
-                        let _ = startup_handle.emit(
-                            "paperclip://server-status",
-                            server::ServerStatus {
-                                state: "failed",
-                                port: launch::DEFAULT_PORT,
-                                url: String::new(),
-                                detail: Some(err),
-                            },
-                        );
+                        state.fail(err);
                         commands::show(&startup_handle);
                     }
                 }

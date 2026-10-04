@@ -1,7 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the Paperclip boot window. The board runs on the local Paperclip origin rather than the app's own protocol, so the shell needs its IPC surface and the opener plugin for revealing the log file.",
+  "description": "Capabilities for the Paperclip boot page only. The boot window is navigated to the Paperclip origin once the server is healthy, so this capability is pinned to the app's own protocol: without the pin, the loaded board would inherit the shell's IPC and the opener permission. Nothing in the board needs either.",
   "windows": ["boot"],
-  "permissions": ["core:default", "opener:allow-open-path"]
+  "remote": {
+    "urls": ["http://tauri.localhost/*"]
+  },
+  "permissions": ["core:default", "opener:allow-open-path", "opener:allow-reveal-item-in-dir"]
 }

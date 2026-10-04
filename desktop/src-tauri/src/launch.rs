@@ -9,9 +9,15 @@
 //! 2. `PAPERCLIP_DESKTOP_SERVER_ENTRY` — a single path to a server entrypoint,
 //!    run with the current executable's Node. Convenient when the path has
 //!    spaces.
-//! 3. `PAPERCLIP_DESKTOP_REPO` (or a `desktop/` sibling of the running
-//!    executable during development) — `server/dist/index.js`, run with Node.
-//! 4. `paperclipai` on `PATH`.
+//! 3. `server/dist/index.js` in a repository checkout, found from
+//!    `PAPERCLIP_DESKTOP_REPO`, the working directory, or the executable's
+//!    location.
+//! 4. `server/src/index.ts` in that checkout, run with the repo's own `tsx` —
+//!    the same entrypoint `pnpm dev` uses, so a clone with no build step still
+//!    runs.
+//! 5. `paperclipai run` on `PATH`.
+//!
+//! `PAPERCLIP_DESKTOP_NODE` overrides the Node interpreter used by 2 through 4.
 //!
 //! A missing server is a configuration error, not a crash: the boot window
 //! stays up and reports what it looked for.
@@ -170,9 +176,13 @@ pub fn resolve_server_launch() -> Result<ServerLaunch, String> {
     }
 
     if which("paperclipai").is_some() {
+        // `paperclipai` alone prints help and exits: `run` is the subcommand
+        // that onboards, checks, and serves. It also performs the CLI's own
+        // foreground-run guard, which is what stops a second server from
+        // attaching to an instance that is already being served.
         return Ok(ServerLaunch {
             program: OsString::from("paperclipai"),
-            args: Vec::new(),
+            args: vec![OsString::from("run")],
             cwd: None,
             source: "paperclipai on PATH".to_string(),
         });
@@ -231,12 +241,16 @@ pub fn which(program: &str) -> Option<PathBuf> {
     None
 }
 
-/// True when something already answers `/api/health` on this port.
+/// True when a Paperclip server answers `/api/health` on this port.
 ///
-/// A desktop shell that starts a second server against the same database is a
-/// corruption risk, so an already-running instance is adopted instead. The
-/// request is written by hand over a loopback socket: the probe runs on the
-/// startup path and must not pull an HTTP client into the binary.
+/// This must identify Paperclip, not just return 200. The shell probes before
+/// it knows how to start anything, and anything else can hold a loopback port:
+/// a dev proxy, a random `python -m http.server`, another app. Adopting one of
+/// those would point the window at it and report it as Paperclip.
+///
+/// The health route answers JSON with `deploymentMode` and `serverVersion` on
+/// every path, so requiring a Paperclip-only key is enough — and it is read
+/// before the shell ever navigates a window there.
 pub fn probe_health(port: u16) -> bool {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -255,10 +269,19 @@ pub fn probe_health(port: u16) -> bool {
         return false;
     }
     let mut response = Vec::new();
-    // Read the status line only; the body can be arbitrarily large.
-    let _ = stream.take(256).read_to_end(&mut response);
+    // The health document is small, but cap the read anyway: this runs on the
+    // startup path and must not buffer an arbitrary response.
+    let _ = stream.take(8 * 1024).read_to_end(&mut response);
     let text = String::from_utf8_lossy(&response);
-    text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200")
+    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+        return false;
+    };
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+    // `deploymentMode` appears in every Paperclip health response and in
+    // nothing else this shell is likely to meet.
+    body.contains("\"deploymentMode\"")
 }
 
 /// The host to dial. `localhost` resolves to `::1` first on some machines while
