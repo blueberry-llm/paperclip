@@ -4,10 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CompanyPortabilityPreviewResult } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ImportExistingOrganization,
-  type ImportedOrganization,
-} from "./ImportExistingOrganization";
+import { ImportExistingOrganization, type ImportedOrganization } from "./ImportExistingOrganization";
+import { importJobStorageKey } from "../../lib/import-job-watch";
+
+// The component resumes a stored job on mount, so every render here happens
+// inside an effect. React only allows act() when it knows it is under test.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockCompaniesApi = vi.hoisted(() => ({
   importPreview: vi.fn(),
@@ -22,11 +24,13 @@ vi.mock("../../api/companies", () => ({
   companiesApi: mockCompaniesApi,
 }));
 
-// The real poll loop waits 3s between job status reads. Tests drive one instant
-// tick instead so a settled job resolves without a timer.
-vi.mock("../../lib/import-job-watch", () => ({
-  waitForNextImportJobPoll: vi.fn(async () => {}),
-}));
+// The real poll loop waits 3s between job status reads, and the real
+// sessionStorage bookkeeping is what the resume path reads. Tests drive one
+// instant tick instead so a settled job resolves without a timer.
+vi.mock("../../lib/import-job-watch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/import-job-watch")>();
+  return { ...actual, waitForNextImportJobPoll: vi.fn(async () => {}) };
+});
 
 function preview(plan: { agents: number; projects: number; issues: number }): CompanyPortabilityPreviewResult {
   return {
@@ -52,6 +56,29 @@ function preview(plan: { agents: number; projects: number; issues: number }): Co
 let container: HTMLDivElement;
 let root: Root;
 let imported: ImportedOrganization[];
+
+async function render() {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ImportExistingOrganization
+        onImported={(value) => {
+          imported.push(value);
+        }}
+      />,
+    );
+  });
+}
+
+/** A button's trimmed text, or null when the step does not offer it. */
+function buttonText(label: string): string | null {
+  const match = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.trim().startsWith(label),
+  );
+  return match?.textContent?.trim() ?? null;
+}
 
 async function settle() {
   await act(async () => {
@@ -89,18 +116,8 @@ async function typeInto(selector: string, value: string) {
 beforeEach(async () => {
   imported = [];
   vi.clearAllMocks();
-  container = document.createElement("div");
-  document.body.appendChild(container);
-  root = createRoot(container);
-  await act(async () => {
-    root.render(
-      <ImportExistingOrganization
-        onImported={(value) => {
-          imported.push(value);
-        }}
-      />,
-    );
-  });
+  window.sessionStorage.clear();
+  await render();
 });
 
 afterEach(async () => {
@@ -162,6 +179,65 @@ describe("ImportExistingOrganization", () => {
       }),
     );
     expect(imported).toEqual([{ companyId: "co-1", issuePrefix: "AC", name: "Acme" }]);
+  });
+
+  it("blocks the import when the preview reports package errors", async () => {
+    const withErrors = preview({ agents: 1, projects: 0, issues: 0 });
+    withErrors.errors = ["agents/ceo.md is missing"];
+    mockCompaniesApi.importPreview.mockResolvedValue(withErrors);
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/broken");
+    await press("Check package");
+    await settle();
+
+    expect(container.textContent).toContain("not ready");
+    expect(container.textContent).toContain("agents/ceo.md is missing");
+    expect(buttonText("Import organization")).toBeNull();
+    expect(mockCompaniesApi.importBundleAsync).not.toHaveBeenCalled();
+  });
+
+  it("reports a package too large for onboarding instead of failing the import", async () => {
+    const oversized = preview({ agents: 1, projects: 0, issues: 0 });
+    // One entry past the inline request ceiling is enough for the preflight to
+    // call the package oversized.
+    oversized.files = { "blobs/big": { encoding: "base64", data: "A".repeat(60 * 1024 * 1024), contentType: "application/octet-stream" } };
+    mockCompaniesApi.importPreview.mockResolvedValue(oversized);
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/huge");
+    await press("Check package");
+    await settle();
+
+    expect(container.textContent).toContain("Settings, then Import");
+    expect(buttonText("Import organization")).toBeNull();
+  });
+
+  it("reports that it is waiting when a reload left an import running", async () => {
+    // Seed the stored job and mount fresh, which is what a reload looks like:
+    // the component has to find the job the server is already running.
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    imported = [];
+    window.sessionStorage.setItem(
+      importJobStorageKey("onboarding", "package"),
+      JSON.stringify({ jobId: "job-resumed", pauseAutomations: false }),
+    );
+    mockCompaniesApi.getImportJob.mockResolvedValue({
+      job: { id: "job-resumed", status: "succeeded", result: { companyId: "co-9" } },
+    });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-9", name: "Resumed", issuePrefix: "RE" });
+
+    await render();
+    await settle();
+
+    // The organization arrives without the user starting a second import, and
+    // the stored job is cleared so a later mount does not adopt it again.
+    expect(mockCompaniesApi.getImportJob).toHaveBeenCalledWith("job-resumed");
+    expect(imported).toEqual([{ companyId: "co-9", issuePrefix: "RE", name: "Resumed" }]);
+    expect(window.sessionStorage.getItem(importJobStorageKey("onboarding", "package"))).toBeNull();
   });
 
   it("surfaces a failed import job instead of reporting an organization", async () => {

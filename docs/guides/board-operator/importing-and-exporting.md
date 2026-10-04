@@ -35,6 +35,15 @@ Both flows are also available in the web UI as company settings pages: **Export*
 
 > **Cloud-managed instances:** when a hosting platform manages the instance, the company is provisioned by the platform and importing is disabled — the Import page and buttons are hidden, and every import API route answers `403` with `code: "cloud_managed"`. Export stays available, so you can always take your company's data with you. Self-hosted instances keep the full import surface.
 
+### Importing during onboarding
+
+The first-run wizard offers two ways to reach your first organization:
+
+- **New organization** — name it, and Paperclip creates an empty one.
+- **Import existing** — read a package (a `.zip` export, or a GitHub URL) and import it as a new organization. You see the agent, project, and issue counts before anything is written, and onboarding then continues with that organization.
+
+Onboarding has one limit that the Import page does not: it cannot upload a package past the inline request ceiling, so a very large company must be imported from the **Import** page or the CLI instead. Onboarding says so when a package is too large, rather than failing the request. A package that reports validation errors cannot be imported from onboarding until those errors are fixed.
+
 The **Export** page lets you pick exactly which files go into the bundle before downloading it. Above the file tree it shows a **"Not included in this export"** panel — the export fidelity report — listing data the bundle will not carry (for example attachments, approvals, cost history, or activity log entries), with blocking issues highlighted.
 
 The **Import** page previews the package, lets you resolve name collisions and adapter assignments, and applies the import. A **"Start imported agents and routines paused"** checkbox (on by default) makes imported agents and routines land paused instead of live. After the import finishes, an **"Activate imported agents and routines"** panel lists everything that was imported paused so you can resume the agents and activate the routines you select — nothing starts running until you say so.

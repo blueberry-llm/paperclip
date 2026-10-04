@@ -1,9 +1,16 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Company, CompanyPortabilityPreviewResult } from "@paperclipai/shared";
 import { AlertTriangle, FileUp, Upload } from "lucide-react";
 import { GithubIcon } from "../icons/github-icon";
 import { companiesApi } from "../../api/companies";
-import { waitForNextImportJobPoll } from "../../lib/import-job-watch";
+import {
+  clearStoredImportJob,
+  importJobStorageKey,
+  readStoredImportJob,
+  waitForNextImportJobPoll,
+  writeStoredImportJob,
+} from "../../lib/import-job-watch";
+import { buildInlineImportPreflight, formatMegabytes } from "../../lib/import-preflight";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -27,6 +34,17 @@ import { Label } from "../ui/label";
 type SourceMode = "package" | "github";
 type Phase = "idle" | "previewing" | "previewed" | "importing";
 
+/**
+ * Session-storage scope for an onboarding import.
+ *
+ * The import page keys stored jobs by company, because it already has one. There
+ * is no company here yet, so the wizard uses a fixed scope. The job id still has
+ * to survive a reload: the server finishes the import either way, and without a
+ * stored id a second attempt would create a second organization.
+ */
+const ONBOARDING_IMPORT_SCOPE = "onboarding";
+const ONBOARDING_IMPORT_PACKAGE_NAME = "package";
+
 export interface ImportedOrganization {
   companyId: string;
   issuePrefix: string;
@@ -35,6 +53,12 @@ export interface ImportedOrganization {
 
 interface Props {
   onImported: (imported: ImportedOrganization) => void;
+  /**
+   * Reports whether a job is in flight, so the wizard can hold its own controls
+   * still. Switching away mid-import would leave the job running with nothing
+   * watching it, and it would then select the imported organization anyway.
+   */
+  onBusyChange?: (busy: boolean) => void;
   disabled?: boolean;
 }
 
@@ -64,7 +88,7 @@ async function readImportedCompany(companyId: string): Promise<Company | null> {
   }
 }
 
-export function ImportExistingOrganization({ onImported, disabled }: Props) {
+export function ImportExistingOrganization({ onImported, onBusyChange, disabled }: Props) {
   const [sourceMode, setSourceMode] = useState<SourceMode>("package");
   const [packageFile, setPackageFile] = useState<File | null>(null);
   const [githubUrl, setGithubUrl] = useState("");
@@ -72,10 +96,47 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [preview, setPreview] = useState<CompanyPortabilityPreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resumedJobId, setResumedJobId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const busy = phase === "previewing" || phase === "importing";
   const counts = countFromPreview(preview);
+
+  // A preview can come back with validation errors, and the import endpoint
+  // will reject the same package. Treat those as not-ready rather than letting
+  // the user spend an import to find out.
+  const previewErrors = preview?.errors ?? [];
+  // Onboarding has no chunked-transfer path, so a package past the inline
+  // request limit cannot complete here. Say so before the request, and point at
+  // the page that can do it.
+  const preflight = preview ? buildInlineImportPreflight(preview.files) : null;
+  const blockedReason = (() => {
+    if (!preview) return null;
+    if (previewErrors.length > 0) {
+      return "This package cannot be imported yet. Fix the problems below, then read it again.";
+    }
+    if (preflight?.tooLarge) {
+      return `This package is about ${formatMegabytes(preflight.estimatedBytes)}, which onboarding cannot upload. Use Settings, then Import, or the CLI for a package this size.`;
+    }
+    return null;
+  })();
+  const readyToApply = phase === "previewed" && blockedReason === null;
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
+
+  // Pick up an import that a reload interrupted. The server runs the job to
+  // completion regardless, so without this the organization would exist and
+  // onboarding would still be asking for a name.
+  useEffect(() => {
+    const stored = readStoredImportJob(ONBOARDING_IMPORT_SCOPE);
+    if (!stored || phase !== "idle") return;
+    setResumedJobId(stored.jobId);
+    void followJob(stored.jobId, stored.storageKey);
+    // Runs once on mount: this is a resume, not a subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function importFields() {
     return {
@@ -98,6 +159,45 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
       return packageFile ? null : "Choose a Paperclip package to import.";
     }
     return githubUrl.trim() ? null : "Enter the GitHub URL of a Paperclip package.";
+  }
+
+  /**
+   * Poll one import job to its end and hand the created organization over.
+   *
+   * `storageKey` is the session-storage entry that names this job, so it can be
+   * cleared on the way out and so a reload resumes the same job rather than
+   * starting another one.
+   */
+  async function followJob(initialJobId: string, storageKey: string) {
+    setPhase("importing");
+    setError(null);
+    try {
+      let jobId = initialJobId;
+      for (;;) {
+        const status = await companiesApi.getImportJob(jobId);
+        if (status.job.status === "succeeded") {
+          clearStoredImportJob(storageKey);
+          const companyId = status.job.result?.companyId ?? status.job.importResult?.company.id;
+          if (!companyId) throw new Error("Import finished without naming the organization.");
+          const company = await readImportedCompany(companyId);
+          onImported({
+            companyId,
+            issuePrefix: company?.issuePrefix ?? "",
+            name: company?.name ?? status.job.importResult?.company.name ?? "Organization",
+          });
+          return;
+        }
+        if (status.job.status === "failed") {
+          clearStoredImportJob(storageKey);
+          throw new Error(status.job.error?.message ?? "Import failed.");
+        }
+        jobId = status.job.id;
+        await waitForNextImportJobPoll();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed.");
+      setPhase("idle");
+    }
   }
 
   async function runPreview() {
@@ -126,6 +226,7 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
   }
 
   async function runImport() {
+    if (!readyToApply) return;
     setPhase("importing");
     setError(null);
     try {
@@ -138,26 +239,11 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
               ...fields,
             });
 
-      let jobId = accepted.job.id;
-      for (;;) {
-        const status = await companiesApi.getImportJob(jobId);
-        if (status.job.status === "succeeded") {
-          const companyId = status.job.result?.companyId ?? status.job.importResult?.company.id;
-          if (!companyId) throw new Error("Import finished without naming the organization.");
-          const company = await readImportedCompany(companyId);
-          onImported({
-            companyId,
-            issuePrefix: company?.issuePrefix ?? "",
-            name: company?.name ?? status.job.importResult?.company.name ?? "Organization",
-          });
-          return;
-        }
-        if (status.job.status === "failed") {
-          throw new Error(status.job.error?.message ?? "Import failed.");
-        }
-        jobId = status.job.id;
-        await waitForNextImportJobPoll();
-      }
+      // Store before following, so a reload in the next few seconds still finds
+      // the job the server is already running.
+      const storageKey = importJobStorageKey(ONBOARDING_IMPORT_SCOPE, ONBOARDING_IMPORT_PACKAGE_NAME);
+      writeStoredImportJob(storageKey, { jobId: accepted.job.id, pauseAutomations: false });
+      await followJob(accepted.job.id, storageKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed.");
       setPhase("previewed");
@@ -246,17 +332,35 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
           onChange={(e) => setNewCompanyName(e.target.value)}
         />
         <p className="text-xs text-muted-foreground">
-          Importing creates a new organization on this instance. Nothing is merged into an
+          Importing creates a new organization on this instance. Nothing merges into an
           existing one.
         </p>
       </div>
 
+      {resumedJobId ? (
+        <p className="text-xs text-muted-foreground">
+          An import from this session is still running. Waiting for it to finish.
+        </p>
+      ) : null}
+
       {preview ? (
         <div className="flex flex-col gap-1 rounded-lg bg-muted p-3 text-sm">
-          <span className="font-medium">Ready to import</span>
+          <span className="font-medium">
+            {blockedReason ? "This package is not ready" : "Ready to import"}
+          </span>
           <span className="text-muted-foreground">
             {counts.agents} agents · {counts.projects} projects · {counts.issues} issues
           </span>
+          {blockedReason ? (
+            <span className="text-muted-foreground">{blockedReason}</span>
+          ) : null}
+          {previewErrors.length > 0 ? (
+            <ul className="list-disc pl-5 text-xs text-destructive">
+              {previewErrors.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
 
@@ -268,7 +372,7 @@ export function ImportExistingOrganization({ onImported, disabled }: Props) {
       ) : null}
 
       <div className="flex items-center gap-2">
-        {phase === "previewed" ? (
+        {readyToApply ? (
           <Button type="button" disabled={busy} onClick={() => void runImport()}>
             <FileUp className="size-4" />
             Import organization

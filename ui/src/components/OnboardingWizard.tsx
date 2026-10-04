@@ -581,6 +581,10 @@ function OnboardingWizardInner({
   // has one and imports it. `import` keeps its own actions inside the step
   // (read the package, then import), so the footer CTA is hidden in that mode.
   const [companyMode, setCompanyMode] = useState<"new" | "import">("new");
+  // Set while the import branch owns a running job. The toggle below has to
+  // stop moving: an abandoned import still finishes on the server, and it would
+  // then select the imported organization after the user chose a different path.
+  const [companyImportBusy, setCompanyImportBusy] = useState(false);
 
   // Step 2
   // The name is not defaulted: a pre-filled "Chief of staff" is a choice made
@@ -1989,6 +1993,11 @@ function OnboardingWizardInner({
   function handleOrganizationImported(imported: ImportedOrganization) {
     const companyIdAtStart = createdCompanyIdRef.current;
     if (!canCommitCreatedCompany(companyIdAtStart, imported.companyId)) return;
+    // The company list drives the selection, and it does not know about the
+    // imported organization yet. Selecting first would let the provider decide
+    // the cached list is wrong and fall back to an older company, so refresh
+    // first and adopt after. The create path invalidates for the same reason.
+    queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     setCreatedCompanyId(imported.companyId);
     createdCompanyIdRef.current = imported.companyId;
     setCreatedCompanyPrefix(imported.issuePrefix);
@@ -2639,6 +2648,7 @@ function OnboardingWizardInner({
                       type="button"
                       variant={companyMode === "new" ? "secondary" : "ghost"}
                       className="rounded-lg"
+                      disabled={companyImportBusy}
                       onClick={() => setCompanyMode("new")}
                     >
                       New organization
@@ -2647,6 +2657,7 @@ function OnboardingWizardInner({
                       type="button"
                       variant={companyMode === "import" ? "secondary" : "ghost"}
                       className="rounded-lg"
+                      disabled={companyImportBusy}
                       onClick={() => setCompanyMode("import")}
                     >
                       Import existing
@@ -2671,7 +2682,10 @@ function OnboardingWizardInner({
                       />
                     </div>
                   ) : (
-                    <ImportExistingOrganization onImported={handleOrganizationImported} />
+                    <ImportExistingOrganization
+                      onImported={handleOrganizationImported}
+                      onBusyChange={setCompanyImportBusy}
+                    />
                   )}
                 </motion.div>
               )}
