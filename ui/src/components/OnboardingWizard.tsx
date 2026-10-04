@@ -132,6 +132,7 @@ import { CredentialModeLink } from "./onboarding/CredentialModeLink";
 import { FooterNav, type FooterPrimaryIcon } from "./onboarding/FooterNav";
 import { OnboardingHeading } from "./onboarding/OnboardingPrimitives";
 import {
+  hasPendingOnboardingImport,
   ImportExistingOrganization,
   type ImportedOrganization,
 } from "./onboarding/ImportExistingOrganization";
@@ -580,7 +581,15 @@ function OnboardingWizardInner({
   // without one and name it; a customer moving from another instance already
   // has one and imports it. `import` keeps its own actions inside the step
   // (read the package, then import), so the footer CTA is hidden in that mode.
-  const [companyMode, setCompanyMode] = useState<"new" | "import">("new");
+  // Starts on the import branch when an import from this session is still
+  // unfinished. The draft cannot carry this: the import job lives in
+  // sessionStorage under its own key, and a reload must land on the branch that
+  // can adopt it. Otherwise the step opens on "New organization" and the create
+  // path makes a second company while the first import finishes in the
+  // background.
+  const [companyMode, setCompanyMode] = useState<"new" | "import">(() =>
+    hasPendingOnboardingImport() ? "import" : "new",
+  );
   // Set while the import branch owns a running job. The toggle below has to
   // stop moving: an abandoned import still finishes on the server, and it would
   // then select the imported organization after the user chose a different path.
@@ -2648,6 +2657,7 @@ function OnboardingWizardInner({
                       type="button"
                       variant={companyMode === "new" ? "secondary" : "ghost"}
                       className="rounded-lg"
+                      aria-pressed={companyMode === "new"}
                       disabled={companyImportBusy}
                       onClick={() => setCompanyMode("new")}
                     >
@@ -2657,6 +2667,7 @@ function OnboardingWizardInner({
                       type="button"
                       variant={companyMode === "import" ? "secondary" : "ghost"}
                       className="rounded-lg"
+                      aria-pressed={companyMode === "import"}
                       disabled={companyImportBusy}
                       onClick={() => setCompanyMode("import")}
                     >

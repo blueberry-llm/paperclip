@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import type { Company, CompanyPortabilityPreviewResult } from "@paperclipai/shared";
 import { AlertTriangle, FileUp, Upload } from "lucide-react";
 import { GithubIcon } from "../icons/github-icon";
-import { companiesApi } from "../../api/companies";
+import { ApiError } from "../../api/client";
+import {
+  companiesApi,
+  type CompanyImportJobAccepted,
+  type CompanyImportJobStatus,
+} from "../../api/companies";
 import {
   clearStoredImportJob,
   importJobStorageKey,
@@ -10,7 +15,8 @@ import {
   waitForNextImportJobPoll,
   writeStoredImportJob,
 } from "../../lib/import-job-watch";
-import { buildInlineImportPreflight, formatMegabytes } from "../../lib/import-preflight";
+import { CHUNKED_IMPORT_THRESHOLD_BYTES } from "../../lib/import-transfer";
+import { formatMegabytes } from "../../lib/import-preflight";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -45,6 +51,18 @@ type Phase = "idle" | "previewing" | "previewed" | "importing";
 const ONBOARDING_IMPORT_SCOPE = "onboarding";
 const ONBOARDING_IMPORT_PACKAGE_NAME = "package";
 
+/**
+ * Whether this browser session has an onboarding import that never settled.
+ *
+ * The wizard calls this before it decides which branch of step 1 to open. A
+ * reload that lands on "New organization" while the server is still running an
+ * import is how one person ends up with two organizations, so the check lives
+ * next to the storage key it reads.
+ */
+export function hasPendingOnboardingImport(): boolean {
+  return readStoredImportJob(ONBOARDING_IMPORT_SCOPE) !== null;
+}
+
 export interface ImportedOrganization {
   companyId: string;
   issuePrefix: string;
@@ -65,14 +83,20 @@ interface Props {
 function countFromPreview(preview: CompanyPortabilityPreviewResult | null): {
   agents: number;
   projects: number;
-  issues: number;
+  tasks: number;
 } {
-  if (!preview) return { agents: 0, projects: 0, issues: 0 };
+  if (!preview) return { agents: 0, projects: 0, tasks: 0 };
   return {
     agents: preview.plan.agentPlans.length,
     projects: preview.plan.projectPlans.length,
-    issues: preview.plan.issuePlans.length,
+    // The wire field is `issuePlans`; user-facing copy says "task" per DESIGN.md.
+    tasks: preview.plan.issuePlans.length,
   };
+}
+
+/** `1 agent` / `2 agents`, without a stray plural on a count of one. */
+function formatCount(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 /**
@@ -88,26 +112,70 @@ async function readImportedCompany(companyId: string): Promise<Company | null> {
   }
 }
 
+/**
+ * The job a 409 submit response points at, if the error carries one.
+ *
+ * The import API answers "202 with a job id, or 409 with the job already
+ * running for this user". Retrying blindly into the 409 leaves the user with no
+ * way forward, because the only offered action is the one that keeps failing.
+ */
+function runningImportJobFromError(err: unknown): CompanyImportJobAccepted | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const body = err.body as { job?: { id?: unknown } } | null;
+  const jobId = body?.job?.id;
+  if (typeof jobId !== "string" || jobId.length === 0) return null;
+  return {
+    job: { id: jobId, status: "running" },
+    statusUrl: `/companies/import/jobs/${jobId}`,
+  };
+}
+
 /** How many times one status read is retried before the step takes over. */
 const STATUS_READ_ATTEMPTS = 3;
 
 /**
- * Read a job's status, retrying a failed read.
+ * Why a status read failed, split the way the Import page splits it.
+ *
+ * The distinction decides whether the step keeps watching the job or reports it
+ * as unrecoverable. Parking a *permanent* client error as "still running" would
+ * leave a phantom job that re-parks on every mount and can never be cleared,
+ * which is worse than saying the job is gone.
+ */
+type StatusReadFailure =
+  /** The server has no record of this job: a restart mid-import, or expiry. */
+  | { kind: "gone" }
+  /** A client error that will not recover by polling again. */
+  | { kind: "unreadable" }
+  /** Network blip, rate limit, or 5xx. The job is still running. */
+  | { kind: "transient"; error: unknown };
+
+function classifyStatusReadFailure(err: unknown): StatusReadFailure {
+  if (err instanceof ApiError && err.status === 404) return { kind: "gone" };
+  if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 429) {
+    return { kind: "unreadable" };
+  }
+  return { kind: "transient", error: err };
+}
+
+/**
+ * Read a job's status, retrying a transient failure.
  *
  * A blip between Paperclip and its own job store must not look like a finished
- * import, because the user would then submit the package again.
+ * import, because the user would then submit the package again. A permanent
+ * failure is rethrown immediately: retrying it only delays the honest answer.
  */
-async function withStatusRetries<T>(read: () => Promise<T>): Promise<T> {
-  let lastError: unknown;
+async function withStatusRetries(read: () => Promise<CompanyImportJobStatus>): Promise<CompanyImportJobStatus> {
+  let lastFailure: StatusReadFailure = { kind: "transient", error: null };
   for (let attempt = 0; attempt < STATUS_READ_ATTEMPTS; attempt += 1) {
     try {
       return await read();
     } catch (err) {
-      lastError = err;
+      lastFailure = classifyStatusReadFailure(err);
+      if (lastFailure.kind !== "transient") throw lastFailure;
       await waitForNextImportJobPoll();
     }
   }
-  throw lastError instanceof Error ? lastError : new Error("Import status is unavailable");
+  throw lastFailure;
 }
 
 export function ImportExistingOrganization({ onImported, onBusyChange, disabled }: Props) {
@@ -134,21 +202,28 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   // will reject the same package. Treat those as not-ready rather than letting
   // the user spend an import to find out.
   const previewErrors = preview?.errors ?? [];
-  // A GitHub source travels as a URL, and the server inlines what it fetches
-  // into a JSON body. That body is what the inline ceiling applies to, so the
-  // estimate comes from the previewed file map. A local `.zip` does not travel
-  // that way: it is uploaded compressed as multipart, where the server's zip cap
-  // applies instead. Measuring a zip against the JSON ceiling would refuse
-  // packages the upload can actually carry.
-  const preflight =
-    preview && sourceMode === "github" ? buildInlineImportPreflight(preview.files) : null;
+  // Size guidance, per source, from what each one actually has to carry:
+  //
+  // - A GitHub source is a URL. The server fetches only the package's text
+  //   files, so it never approaches the inline request ceiling and there is
+  //   nothing to predict here.
+  // - A local `.zip` is uploaded in one multipart request. Above the chunked
+  //   threshold the Import page switches to a chunked transfer that onboarding
+  //   does not have, so say so before the upload rather than after.
+  const zipTooLargeForChunking =
+    sourceMode === "package" && packageFile
+      ? packageFile.size > CHUNKED_IMPORT_THRESHOLD_BYTES
+      : false;
   const blockedReason = (() => {
+    // A job we can still watch owns this step. Offering any other action here
+    // is how a second organization gets created.
+    if (watchableJob) return null;
     if (!preview) return null;
     if (previewErrors.length > 0) {
       return "This package cannot be imported yet. Fix the problems below, then read it again.";
     }
-    if (preflight?.tooLarge) {
-      return `This package is about ${formatMegabytes(preflight.estimatedBytes)}, which onboarding cannot fetch. Use Settings, then Import, or the CLI for a package this size.`;
+    if (zipTooLargeForChunking) {
+      return `This package is ${formatMegabytes(packageFile!.size)}. Onboarding cannot upload a package that large in one request. Use Settings, then Import, or the CLI.`;
     }
     return null;
   })();
@@ -178,6 +253,11 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
         newCompanyName: newCompanyName.trim() || null,
       },
       collisionStrategy: "skip" as const,
+      // Imported agents and routines land paused, matching the Import page's
+      // default. Onboarding has no activation panel, so an agent that starts
+      // running the moment it is imported would begin working a task before the
+      // operator has seen the board.
+      pauseAutomations: true,
     };
   }
 
@@ -212,17 +292,30 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
     let jobId = initialJobId;
     try {
       for (;;) {
-        let status: Awaited<ReturnType<typeof companiesApi.getImportJob>>;
+        let status: CompanyImportJobStatus;
         try {
           status = await withStatusRetries(() => companiesApi.getImportJob(jobId));
-        } catch {
-          // Watch the same job again rather than accepting a new one.
-          setWatchableJob({ jobId, storageKey });
-          setPhase("idle");
-          setError(
-            "Paperclip lost contact with the import. It is still running, so this step will keep watching the same import rather than start a second one.",
+        } catch (readFailure) {
+          // Only a *transient* failure leaves a job we can still watch. A 404
+          // means the server forgot it, and a permanent client error will not
+          // recover by polling, so both clear the stored job and report it
+          // rather than parking a phantom import the step can never clear.
+          const failure = readFailure as { kind: StatusReadFailure["kind"] };
+          if (failure.kind === "transient") {
+            setWatchableJob({ jobId, storageKey });
+            setPhase("idle");
+            setError(
+              "Paperclip lost contact with the import. It is still running, so this step keeps watching the same import rather than starting a second one.",
+            );
+            return;
+          }
+          clearStoredImportJob(storageKey);
+          setWatchableJob(null);
+          throw new Error(
+            failure.kind === "gone"
+              ? "The server no longer reports this import. It may have restarted while the import ran."
+              : "This import's status can no longer be read. Your session may have expired.",
           );
-          return;
         }
         if (status.job.status === "succeeded") {
           clearStoredImportJob(storageKey);
@@ -252,6 +345,9 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   }
 
   async function runPreview() {
+    // A job we are still watching owns this instance. Reading another package
+    // would tempt a second submit, and a second submit is a second company.
+    if (watchableJob) return;
     const missing = sourceError();
     if (missing) {
       setError(missing);
@@ -277,23 +373,35 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   }
 
   async function runImport() {
-    if (!readyToApply) return;
+    if (!readyToApply || watchableJob) return;
     setPhase("importing");
     setError(null);
     try {
       const fields = importFields();
-      const accepted =
-        sourceMode === "package"
-          ? await companiesApi.importBundlePackageAsync(packageFile!, fields)
-          : await companiesApi.importBundleAsync({
-              source: { type: "github", url: githubUrl.trim() },
-              ...fields,
-            });
+      let accepted: CompanyImportJobAccepted;
+      try {
+        accepted =
+          sourceMode === "package"
+            ? await companiesApi.importBundlePackageAsync(packageFile!, fields)
+            : await companiesApi.importBundleAsync({
+                source: { type: "github", url: githubUrl.trim() },
+                ...fields,
+              });
+      } catch (submitError) {
+        // A 409 carries the job the server is already running for this user.
+        // Adopting it is what keeps a retry from becoming a second company.
+        const running = runningImportJobFromError(submitError);
+        if (!running) throw submitError;
+        accepted = running;
+        setError(
+          "An import from this session is already running. Following that one instead of starting another.",
+        );
+      }
 
       // Store before following, so a reload in the next few seconds still finds
       // the job the server is already running.
       const storageKey = importJobStorageKey(ONBOARDING_IMPORT_SCOPE, ONBOARDING_IMPORT_PACKAGE_NAME);
-      writeStoredImportJob(storageKey, { jobId: accepted.job.id, pauseAutomations: false });
+      writeStoredImportJob(storageKey, { jobId: accepted.job.id, pauseAutomations: true });
       await followJob(accepted.job.id, storageKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed.");
@@ -304,10 +412,12 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <Label>Bring an organization with you</Label>
+        <Label htmlFor="onboarding-import-source">Bring an organization with you</Label>
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
+            id="onboarding-import-source"
+            aria-pressed={sourceMode === "package"}
             disabled={disabled || busy}
             onClick={() => {
               setSourceMode("package");
@@ -323,6 +433,7 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
           </button>
           <button
             type="button"
+            aria-pressed={sourceMode === "github"}
             disabled={disabled || busy}
             onClick={() => {
               setSourceMode("github");
@@ -419,7 +530,8 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
             {blockedReason ? "This package is not ready" : "Ready to import"}
           </span>
           <span className="text-muted-foreground">
-            {counts.agents} agents · {counts.projects} projects · {counts.issues} issues
+            {formatCount(counts.agents, "agent")} · {formatCount(counts.projects, "project")} ·{" "}
+            {formatCount(counts.tasks, "task")}
           </span>
           {blockedReason ? (
             <span className="text-muted-foreground">{blockedReason}</span>

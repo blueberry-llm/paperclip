@@ -40,9 +40,16 @@ Both flows are also available in the web UI as company settings pages: **Export*
 The first-run wizard offers two ways to reach your first organization:
 
 - **New organization** — name it, and Paperclip creates an empty one.
-- **Import existing** — read a package (a `.zip` export, or a GitHub URL) and import it as a new organization. You see the agent, project, and issue counts before anything is written, and onboarding then continues with that organization.
+- **Import existing** — read a package (a `.zip` export, or a GitHub URL) and import it as a new organization. You see the agent, project, and task counts before anything is written, and onboarding then continues with that organization.
 
-Onboarding has one limit that the Import page does not: it cannot upload a package past the inline request ceiling, so a very large company must be imported from the **Import** page or the CLI instead. Onboarding says so when a package is too large, rather than failing the request. A package that reports validation errors cannot be imported from onboarding until those errors are fixed.
+Imported agents and routines arrive **paused**, as they do on the Import page. Onboarding has no activation panel, so turn them on from the board when you are ready.
+
+Two limits apply to onboarding, and both point you at the **Import** page or the CLI:
+
+- **No chunked transfer.** A `.zip` above the chunked-transfer threshold is uploaded in a single request, so a very large company must be imported from the Import page or the CLI. Onboarding says so before it uploads rather than failing the request. A GitHub URL is unaffected: the server fetches only the package's text files.
+- **No collision resolution.** Onboarding cannot rename or review name conflicts, so it skips anything that already exists. Use the Import page when a package needs its names adjusted first.
+
+A package that reports validation errors cannot be imported from onboarding until those errors are fixed.
 
 The **Export** page lets you pick exactly which files go into the bundle before downloading it. Above the file tree it shows a **"Not included in this export"** panel — the export fidelity report — listing data the bundle will not carry (for example attachments, approvals, cost history, or activity log entries), with blocking issues highlighted.
 

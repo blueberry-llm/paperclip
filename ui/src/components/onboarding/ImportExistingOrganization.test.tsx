@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CompanyPortabilityPreviewResult } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../../api/client";
 import { ImportExistingOrganization, type ImportedOrganization } from "./ImportExistingOrganization";
 import { importJobStorageKey } from "../../lib/import-job-watch";
 
@@ -98,6 +99,17 @@ async function press(label: string) {
   });
 }
 
+/** Attach a package file to the step's file input. */
+async function choosePackage(file: { name: string; size: number }) {
+  const input = container.querySelector<HTMLInputElement>("#onboarding-import-package")!;
+  await act(async () => {
+    const handle = new File(["zip"], file.name, { type: "application/zip" });
+    Object.defineProperty(handle, "size", { value: file.size });
+    Object.defineProperty(input, "files", { value: [handle], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 /**
  * React tracks the previous value of a controlled input, so assigning `.value`
  * and dispatching is swallowed. Go through the prototype setter to make the
@@ -148,7 +160,7 @@ describe("ImportExistingOrganization", () => {
     expect(mockCompaniesApi.importPreviewPackage).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("Ready to import");
     expect(container.textContent).toContain("2 agents");
-    expect(container.textContent).toContain("5 issues");
+    expect(container.textContent).toContain("5 tasks");
   });
 
   it("applies a GitHub source as a new organization and reports the created company", async () => {
@@ -197,28 +209,26 @@ describe("ImportExistingOrganization", () => {
     expect(mockCompaniesApi.importBundleAsync).not.toHaveBeenCalled();
   });
 
-  it("reports a GitHub package too large to fetch instead of failing the import", async () => {
-    const oversized = preview({ agents: 1, projects: 0, issues: 0 });
-    // One entry past the inline request ceiling is enough for the preflight to
-    // call the package oversized.
-    oversized.files = { "blobs/big": { encoding: "base64", data: "A".repeat(60 * 1024 * 1024), contentType: "application/octet-stream" } };
-    mockCompaniesApi.importPreview.mockResolvedValue(oversized);
+  it("points a large local zip at the Import page instead of attempting one upload", async () => {
+    // Onboarding has no chunked transfer, so a zip past the threshold cannot
+    // complete here. The message has to name a place that can do it.
+    mockCompaniesApi.importPreviewPackage.mockResolvedValue(
+      preview({ agents: 1, projects: 0, issues: 0 }),
+    );
 
-    await press("From GitHub");
-    await typeInto("#onboarding-import-github", "https://github.com/acme/huge");
+    await choosePackage({ name: "big.zip", size: 60 * 1024 * 1024 });
     await press("Check package");
     await settle();
 
     expect(container.textContent).toContain("Settings, then Import");
     expect(buttonText("Import organization")).toBeNull();
+    expect(mockCompaniesApi.importBundlePackageAsync).not.toHaveBeenCalled();
   });
 
-  it("does not hold a local zip to the inline limit", async () => {
-    // A zip is uploaded compressed as multipart, so the JSON inline ceiling does
-    // not describe what it can carry.
-    const bigZip = preview({ agents: 1, projects: 0, issues: 0 });
-    bigZip.files = { "blobs/big": { encoding: "base64", data: "A".repeat(60 * 1024 * 1024), contentType: "application/octet-stream" } };
-    mockCompaniesApi.importPreviewPackage.mockResolvedValue(bigZip);
+  it("uploads a small local zip in one request", async () => {
+    mockCompaniesApi.importPreviewPackage.mockResolvedValue(
+      preview({ agents: 1, projects: 0, issues: 0 }),
+    );
     mockCompaniesApi.importBundlePackageAsync.mockResolvedValue({
       job: { id: "job-zip", status: "running" },
     });
@@ -227,12 +237,7 @@ describe("ImportExistingOrganization", () => {
     });
     mockCompaniesApi.get.mockResolvedValue({ id: "co-zip", name: "Zipped", issuePrefix: "ZI" });
 
-    const input = container.querySelector<HTMLInputElement>("#onboarding-import-package")!;
-    await act(async () => {
-      const file = new File(["zip"], "big.zip", { type: "application/zip" });
-      Object.defineProperty(input, "files", { value: [file], configurable: true });
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    await choosePackage({ name: "small.zip", size: 2048 });
     await press("Check package");
     await settle();
 
@@ -240,6 +245,29 @@ describe("ImportExistingOrganization", () => {
     await press("Import organization");
     await settle();
     expect(imported).toEqual([{ companyId: "co-zip", issuePrefix: "ZI", name: "Zipped" }]);
+  });
+
+  it("pauses imported agents and routines", async () => {
+    // The Import page defaults to paused. Onboarding has no activation panel,
+    // so an agent that started working the moment it landed would run before the
+    // operator has seen the board.
+    mockCompaniesApi.importPreview.mockResolvedValue(preview({ agents: 1, projects: 0, issues: 0 }));
+    mockCompaniesApi.importBundleAsync.mockResolvedValue({ job: { id: "job-p", status: "running" } });
+    mockCompaniesApi.getImportJob.mockResolvedValue({
+      job: { id: "job-p", status: "succeeded", result: { companyId: "co-p" } },
+    });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-p", name: "Paused", issuePrefix: "PA" });
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/paused");
+    await press("Check package");
+    await settle();
+    await press("Import organization");
+    await settle();
+
+    expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ pauseAutomations: true }),
+    );
   });
 
   it("keeps watching the same job when a status read fails", async () => {
@@ -283,6 +311,16 @@ describe("ImportExistingOrganization", () => {
     // No second job: the step holds the one the server is already running.
     expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
 
+    // The step must also refuse to *start* another one. Re-reading the package
+    // and pressing import again used to submit a second import, which is a second
+    // organization.
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/second");
+    await press("Check package");
+    await settle();
+    expect(buttonText("Import organization")).toBeNull();
+    expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
+
     mockCompaniesApi.getImportJob.mockResolvedValue({
       job: { id: "job-gone", status: "succeeded", result: { companyId: "co-8" } },
     });
@@ -292,6 +330,49 @@ describe("ImportExistingOrganization", () => {
 
     expect(imported).toEqual([{ companyId: "co-8", issuePrefix: "RC", name: "Recovered" }]);
     expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a lost job instead of parking it as still running", async () => {
+    // A 404 means the server forgot the job. Parking that as "still running"
+    // leaves a phantom import that re-parks on every mount and never clears.
+    mockCompaniesApi.importPreview.mockResolvedValue(preview({ agents: 1, projects: 0, issues: 0 }));
+    mockCompaniesApi.importBundleAsync.mockResolvedValue({ job: { id: "job-lost", status: "running" } });
+    mockCompaniesApi.getImportJob.mockRejectedValue(new ApiError("not found", 404, null));
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/lost");
+    await press("Check package");
+    await settle();
+    await press("Import organization");
+    await settle();
+
+    expect(container.textContent).toContain("no longer reports this import");
+    expect(buttonText("Keep watching")).toBeNull();
+    expect(window.sessionStorage.getItem(importJobStorageKey("onboarding", "package"))).toBeNull();
+    // One read only: a permanent failure is not retried.
+    expect(mockCompaniesApi.getImportJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts the running job when a submit is refused with a conflict", async () => {
+    mockCompaniesApi.importPreview.mockResolvedValue(preview({ agents: 1, projects: 0, issues: 0 }));
+    mockCompaniesApi.importBundleAsync.mockRejectedValue(
+      new ApiError("conflict", 409, { job: { id: "job-409" } }),
+    );
+    mockCompaniesApi.getImportJob.mockResolvedValue({
+      job: { id: "job-409", status: "succeeded", result: { companyId: "co-409" } },
+    });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-409", name: "Adopted", issuePrefix: "AD" });
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/conflict");
+    await press("Check package");
+    await settle();
+    await press("Import organization");
+    await settle();
+
+    // The conflict response names the job the server is already running, so the
+    // step follows that one rather than leaving the user with a dead end.
+    expect(imported).toEqual([{ companyId: "co-409", issuePrefix: "AD", name: "Adopted" }]);
   });
 
   it("reports that it is waiting when a reload left an import running", async () => {
