@@ -155,7 +155,10 @@
         <p id="detail">Launching the control plane…</p>
       </div>
       <pre id="error" hidden></pre>
-      <button id="retry" type="button" hidden>Try again</button>
+      <div class="row">
+        <button id="retry" type="button" hidden>Try again</button>
+        <button id="open-log" type="button">Open logs</button>
+      </div>
       <p id="logpath"></p>
     </main>
 
@@ -168,6 +171,7 @@
       const detail = document.getElementById("detail");
       const error = document.getElementById("error");
       const retry = document.getElementById("retry");
+      const openLog = document.getElementById("open-log");
       const logPath = document.getElementById("logpath");
 
       function render(status) {
@@ -203,6 +207,10 @@
         retry.hidden = true;
         detail.textContent = "Restarting…";
         invoke?.("restart_server");
+      });
+
+      openLog.addEventListener("click", () => {
+        invoke?.("open_log_folder");
       });
     </script>
   </body>

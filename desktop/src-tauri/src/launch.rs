@@ -29,6 +29,13 @@ const PORT_ATTEMPTS: u16 = 20;
 pub struct ServerLaunch {
     pub program: OsString,
     pub args: Vec<OsString>,
+    /// Working directory for the child.
+    ///
+    /// The server resolves `ui/dist`, its instance data directory, and its
+    /// config relative to the process, so a shell launched from a file manager
+    /// (whose working directory is the executable's folder) has to hand it the
+    /// checkout root instead of inheriting that.
+    pub cwd: Option<PathBuf>,
     /// Human-readable description of how the command was resolved, shown in the
     /// boot window's diagnostics when startup fails.
     pub source: String,
@@ -119,6 +126,7 @@ pub fn resolve_server_launch() -> Result<ServerLaunch, String> {
         return Ok(ServerLaunch {
             program: OsString::from(program),
             args: rest.iter().map(OsString::from).collect(),
+            cwd: None,
             source: "PAPERCLIP_DESKTOP_SERVER".to_string(),
         });
     }
@@ -127,27 +135,45 @@ pub fn resolve_server_launch() -> Result<ServerLaunch, String> {
         return Ok(ServerLaunch {
             program: node_program(),
             args: vec![entry],
+            cwd: None,
             source: "PAPERCLIP_DESKTOP_SERVER_ENTRY".to_string(),
         });
     }
 
     let mut searched: Vec<String> = Vec::new();
     for root in repo_candidates() {
-        let entry = root.join("server").join("dist").join("index.js");
-        if entry.is_file() {
+        let built = root.join("server").join("dist").join("index.js");
+        if built.is_file() {
             return Ok(ServerLaunch {
                 program: node_program(),
-                args: vec![entry.into_os_string()],
-                source: format!("repo checkout ({})", root.display()),
+                args: vec![built.into_os_string()],
+                cwd: Some(root.clone()),
+                source: format!("built server ({})", root.display()),
             });
         }
-        searched.push(entry.display().to_string());
+        // A checkout without a built server is still runnable: the repo ships
+        // tsx under cli/, so the shell can start the same entrypoint `pnpm dev`
+        // uses. Without this, an installed shell next to a source checkout can
+        // only ever adopt a server somebody else started.
+        let source_entry = root.join("server").join("src").join("index.ts");
+        if source_entry.is_file() {
+            if let Some(tsx) = repo_tsx(&root) {
+                return Ok(ServerLaunch {
+                    program: node_program(),
+                    args: vec![tsx.into_os_string(), source_entry.into_os_string()],
+                    cwd: Some(root.clone()),
+                    source: format!("server from source ({})", root.display()),
+                });
+            }
+        }
+        searched.push(built.display().to_string());
     }
 
     if which("paperclipai").is_some() {
         return Ok(ServerLaunch {
             program: OsString::from("paperclipai"),
             args: Vec::new(),
+            cwd: None,
             source: "paperclipai on PATH".to_string(),
         });
     }
@@ -161,6 +187,21 @@ pub fn resolve_server_launch() -> Result<ServerLaunch, String> {
             searched.join(", ")
         }
     ))
+}
+
+/// The repo's own tsx, used to run the server from source.
+///
+/// The checkout keeps tsx under `cli/node_modules`, installed by the repo's own
+/// `pnpm install`. It is the same interpreter the root `dev` script uses, so the
+/// shell starts the server the developer would have started by hand.
+fn repo_tsx(root: &Path) -> Option<PathBuf> {
+    let tsx = root
+        .join("cli")
+        .join("node_modules")
+        .join("tsx")
+        .join("dist")
+        .join("cli.mjs");
+    tsx.is_file().then_some(tsx)
 }
 
 /// Minimal `PATH` lookup. Avoids a dependency for one call.
@@ -235,15 +276,27 @@ pub fn base_url(port: u16) -> String {
     format!("http://{}:{}", local_host().unwrap_or("localhost"), port)
 }
 
+/// The port an operator means when they name one, else the documented default.
+///
+/// This is where the shell looks for a Paperclip that is already running, which
+/// is a different question from "which port is free".
+pub fn preferred_port() -> Result<u16, String> {
+    if let Some(raw) = env::var_os("PAPERCLIP_DESKTOP_PORT") {
+        return raw
+            .to_string_lossy()
+            .trim()
+            .parse()
+            .map_err(|_| format!("PAPERCLIP_DESKTOP_PORT is not a port number: {raw:?}"));
+    }
+    Ok(DEFAULT_PORT)
+}
+
 /// Pick the port to serve on: an explicit override, else the default if free,
 /// else the next free ports up to `PORT_ATTEMPTS`.
 pub fn resolve_port() -> Result<u16, String> {
     if let Some(raw) = env::var_os("PAPERCLIP_DESKTOP_PORT") {
-        let parsed: u16 = raw
-            .to_string_lossy()
-            .trim()
-            .parse()
-            .map_err(|_| format!("PAPERCLIP_DESKTOP_PORT is not a port number: {raw:?}"))?;
+        let parsed = preferred_port()?;
+        debug_assert!(raw.to_string_lossy().trim().parse::<u16>().is_ok());
         return Ok(parsed);
     }
     for offset in 0..PORT_ATTEMPTS {
@@ -285,7 +338,10 @@ mod tests {
 
     #[test]
     fn splits_bare_words() {
-        assert_eq!(split_argv("  paperclipai   start "), vec!["paperclipai", "start"]);
+        assert_eq!(
+            split_argv("  paperclipai   start "),
+            vec!["paperclipai", "start"]
+        );
     }
 
     #[test]

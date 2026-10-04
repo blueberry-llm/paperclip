@@ -37,6 +37,25 @@ pub async fn restart_server(
     Ok(port)
 }
 
+/// Reveal the log directory in the system file manager.
+///
+/// The capability is declared for exactly this, and a startup failure is much
+/// easier to act on when the log is one click away.
+#[tauri::command]
+pub fn open_log_folder(handle: State<'_, Arc<ServerHandle<Wry>>>) -> Result<(), String> {
+    let path = handle.log_path().to_path_buf();
+    let directory = path
+        .parent()
+        .ok_or("The log path has no parent directory")?;
+    // The log may not exist yet — a user can hit this before the first server
+    // write — so reveal the directory rather than the file.
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .or_else(|_| {
+            tauri_plugin_opener::open_path(directory.to_string_lossy().to_string(), None::<&str>)
+        })
+        .map_err(|err| format!("Could not open the log folder: {err}"))
+}
+
 /// Point the window at the running board.
 pub fn navigate(app: &AppHandle, url: &str) {
     if let Some(window) = app.get_webview_window("boot") {

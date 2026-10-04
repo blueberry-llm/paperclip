@@ -49,14 +49,23 @@ pub fn run() {
                     }
                     Err(err) => {
                         // The boot page already renders failures from the status
-                        // event; logging keeps the detail out of the UI layer.
-                        eprintln!("[paperclip-desktop] startup failed: {err}");
-                        let _ = startup_handle.emit("paperclip://server-status", server::ServerStatus {
-                            state: "failed",
-                            port: launch::DEFAULT_PORT,
-                            url: String::new(),
-                            detail: Some(err),
-                        });
+                        // event; the log keeps the detail for a user who never
+                        // sees the window.
+                        server::record_shell_failure(
+                            startup_handle
+                                .state::<std::sync::Arc<ServerHandle<tauri::Wry>>>()
+                                .log_path(),
+                            &format!("startup failed: {err}"),
+                        );
+                        let _ = startup_handle.emit(
+                            "paperclip://server-status",
+                            server::ServerStatus {
+                                state: "failed",
+                                port: launch::DEFAULT_PORT,
+                                url: String::new(),
+                                detail: Some(err),
+                            },
+                        );
                         commands::show(&startup_handle);
                     }
                 }
@@ -74,7 +83,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::boot_info,
-            commands::restart_server
+            commands::restart_server,
+            commands::open_log_folder
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Paperclip desktop app")

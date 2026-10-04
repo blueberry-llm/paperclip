@@ -86,7 +86,11 @@ impl<R: Runtime> ServerHandle<R> {
     pub fn status(&self) -> ServerStatus {
         let inner = self.inner.lock().unwrap();
         ServerStatus {
-            state: if inner.child.is_some() { "running" } else { "stopped" },
+            state: if inner.child.is_some() {
+                "running"
+            } else {
+                "stopped"
+            },
             port: inner.port,
             url: launch::base_url(inner.port),
             detail: None,
@@ -117,14 +121,32 @@ impl<R: Runtime> ServerHandle<R> {
             }
         }
 
+        // Adopt a server that is already serving before looking for a free port.
+        //
+        // Order matters. Scanning for a free port first would skip straight past
+        // the documented port whenever something already listens there — which is
+        // exactly the case where a Paperclip the user started themselves is
+        // running — and the shell would then try to start a second server against
+        // the same database.
+        let preferred = launch::preferred_port()?;
+        if launch::probe_health(preferred) {
+            self.inner.lock().unwrap().port = preferred;
+            self.publish(
+                "ready",
+                preferred,
+                Some("Attached to a Paperclip server that was already running".to_string()),
+            );
+            return Ok(preferred);
+        }
+
         let port = launch::resolve_port()?;
         if launch::probe_health(port) {
+            self.inner.lock().unwrap().port = port;
             self.publish(
                 "ready",
                 port,
                 Some("Attached to a Paperclip server that was already running".to_string()),
             );
-            self.inner.lock().unwrap().port = port;
             return Ok(port);
         }
 
@@ -137,6 +159,15 @@ impl<R: Runtime> ServerHandle<R> {
 
         let mut child = Command::new(&resolved.program)
             .args(&resolved.args)
+            // The server resolves its UI bundle, instance data, and config
+            // relative to the process, so it needs the checkout root rather than
+            // whatever directory the shell happened to be launched from.
+            .current_dir(
+                resolved
+                    .cwd
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
             // The shell owns the port; the server must not pick its own.
             .env("PORT", port.to_string())
             .env("PAPERCLIP_PORT", port.to_string())
@@ -221,29 +252,33 @@ impl<R: Runtime> ServerHandle<R> {
 
     /// Stop the server if this shell owns it. Idempotent.
     pub fn stop(&self) {
-        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut guard = self.inner.lock().unwrap();
-        let Some(mut child) = guard.child.take() else { return };
+        let Some(mut child) = guard.child.take() else {
+            return;
+        };
         terminate(&mut child);
         // Reap so the child does not linger as a zombie on Unix.
         let _ = child.wait();
-#[cfg(windows)]
-            {
-                // KILL_ON_JOB_CLOSE is set at creation, so closing the handle is
-                // itself the kill for anything still in the job.
-                if let Some(job) = guard.job.take() {
-                    unsafe {
-                        windows_sys::Win32::Foundation::CloseHandle(job.0);
-                    }
+        #[cfg(windows)]
+        {
+            // KILL_ON_JOB_CLOSE is set at creation, so closing the handle is
+            // itself the kill for anything still in the job.
+            if let Some(job) = guard.job.take() {
+                unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(job.0);
                 }
             }
+        }
         let _ = &guard;
     }
 
     /// Stop then start again. Used by the boot window's retry action.
     pub async fn restart(&self) -> Result<u16, String> {
         self.stop();
-        self.stopping.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.stopping
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.start().await
     }
 }
@@ -254,12 +289,19 @@ fn spawn_pump<R: std::io::Read + Send + 'static>(
     stream_name: &'static str,
 ) {
     std::thread::spawn(move || {
-        let Some(file) = open_append(&path) else { return };
+        let Some(file) = open_append(&path) else {
+            return;
+        };
         let mut writer = std::io::BufWriter::new(file);
         let _ = writeln!(writer, "--- {stream_name} ---");
+        let _ = writer.flush();
         for line in BufReader::new(reader).lines() {
             let Ok(line) = line else { break };
             let _ = writeln!(writer, "{line}");
+            // Flush per line. A server can take a minute to bind its port, and
+            // a user watching a boot screen with an empty log has nothing to
+            // go on while that happens.
+            let _ = writer.flush();
         }
         let _ = writer.flush();
     });
@@ -274,6 +316,20 @@ fn open_append(path: &std::path::Path) -> Option<std::fs::File> {
         .append(true)
         .open(path)
         .ok()
+}
+
+/// Record a shell-level failure in the same log the server writes to.
+///
+/// A release build sets `windows_subsystem = "windows"`, so it has no console to
+/// print to. Without this, a startup failure would leave the boot page as the
+/// only account of what went wrong.
+pub fn record_shell_failure(log_path: &std::path::Path, message: &str) {
+    let Some(mut file) = open_append(log_path) else {
+        return;
+    };
+    let _ = writeln!(file, "--- desktop shell ---");
+    let _ = writeln!(file, "{message}");
+    let _ = file.flush();
 }
 
 fn tail_log(path: &std::path::Path, lines: usize) -> String {
@@ -326,7 +382,9 @@ fn attach_job(child: &Child) -> Option<JobHandle> {
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
 
     unsafe {
         let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -372,4 +430,3 @@ pub fn stop_on_exit<R: Runtime>(app: &AppHandle<R>) {
         handle.stop();
     }
 }
-
