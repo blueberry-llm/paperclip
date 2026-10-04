@@ -197,7 +197,7 @@ describe("ImportExistingOrganization", () => {
     expect(mockCompaniesApi.importBundleAsync).not.toHaveBeenCalled();
   });
 
-  it("reports a package too large for onboarding instead of failing the import", async () => {
+  it("reports a GitHub package too large to fetch instead of failing the import", async () => {
     const oversized = preview({ agents: 1, projects: 0, issues: 0 });
     // One entry past the inline request ceiling is enough for the preflight to
     // call the package oversized.
@@ -211,6 +211,87 @@ describe("ImportExistingOrganization", () => {
 
     expect(container.textContent).toContain("Settings, then Import");
     expect(buttonText("Import organization")).toBeNull();
+  });
+
+  it("does not hold a local zip to the inline limit", async () => {
+    // A zip is uploaded compressed as multipart, so the JSON inline ceiling does
+    // not describe what it can carry.
+    const bigZip = preview({ agents: 1, projects: 0, issues: 0 });
+    bigZip.files = { "blobs/big": { encoding: "base64", data: "A".repeat(60 * 1024 * 1024), contentType: "application/octet-stream" } };
+    mockCompaniesApi.importPreviewPackage.mockResolvedValue(bigZip);
+    mockCompaniesApi.importBundlePackageAsync.mockResolvedValue({
+      job: { id: "job-zip", status: "running" },
+    });
+    mockCompaniesApi.getImportJob.mockResolvedValue({
+      job: { id: "job-zip", status: "succeeded", result: { companyId: "co-zip" } },
+    });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-zip", name: "Zipped", issuePrefix: "ZI" });
+
+    const input = container.querySelector<HTMLInputElement>("#onboarding-import-package")!;
+    await act(async () => {
+      const file = new File(["zip"], "big.zip", { type: "application/zip" });
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await press("Check package");
+    await settle();
+
+    expect(container.textContent).toContain("Ready to import");
+    await press("Import organization");
+    await settle();
+    expect(imported).toEqual([{ companyId: "co-zip", issuePrefix: "ZI", name: "Zipped" }]);
+  });
+
+  it("keeps watching the same job when a status read fails", async () => {
+    mockCompaniesApi.importPreview.mockResolvedValue(preview({ agents: 1, projects: 0, issues: 0 }));
+    mockCompaniesApi.importBundleAsync.mockResolvedValue({ job: { id: "job-flaky", status: "running" } });
+    // Two failures, then a result: the step retries the read rather than
+    // treating the import as finished.
+    mockCompaniesApi.getImportJob
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValue({
+        job: { id: "job-flaky", status: "succeeded", result: { companyId: "co-7" } },
+      });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-7", name: "Retried", issuePrefix: "RT" });
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/flaky");
+    await press("Check package");
+    await settle();
+    await press("Import organization");
+    await settle();
+
+    expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
+    expect(imported).toEqual([{ companyId: "co-7", issuePrefix: "RT", name: "Retried" }]);
+  });
+
+  it("offers to keep watching instead of accepting a second import", async () => {
+    mockCompaniesApi.importPreview.mockResolvedValue(preview({ agents: 1, projects: 0, issues: 0 }));
+    mockCompaniesApi.importBundleAsync.mockResolvedValue({ job: { id: "job-gone", status: "running" } });
+    mockCompaniesApi.getImportJob.mockRejectedValue(new Error("network"));
+
+    await press("From GitHub");
+    await typeInto("#onboarding-import-github", "https://github.com/acme/gone");
+    await press("Check package");
+    await settle();
+    await press("Import organization");
+    await settle();
+
+    expect(container.textContent).toContain("still running on the server");
+    expect(buttonText("Keep watching")).not.toBeNull();
+    // No second job: the step holds the one the server is already running.
+    expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
+
+    mockCompaniesApi.getImportJob.mockResolvedValue({
+      job: { id: "job-gone", status: "succeeded", result: { companyId: "co-8" } },
+    });
+    mockCompaniesApi.get.mockResolvedValue({ id: "co-8", name: "Recovered", issuePrefix: "RC" });
+    await press("Keep watching");
+    await settle();
+
+    expect(imported).toEqual([{ companyId: "co-8", issuePrefix: "RC", name: "Recovered" }]);
+    expect(mockCompaniesApi.importBundleAsync).toHaveBeenCalledTimes(1);
   });
 
   it("reports that it is waiting when a reload left an import running", async () => {

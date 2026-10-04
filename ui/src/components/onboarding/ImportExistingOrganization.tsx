@@ -88,6 +88,28 @@ async function readImportedCompany(companyId: string): Promise<Company | null> {
   }
 }
 
+/** How many times one status read is retried before the step takes over. */
+const STATUS_READ_ATTEMPTS = 3;
+
+/**
+ * Read a job's status, retrying a failed read.
+ *
+ * A blip between Paperclip and its own job store must not look like a finished
+ * import, because the user would then submit the package again.
+ */
+async function withStatusRetries<T>(read: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < STATUS_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await read();
+    } catch (err) {
+      lastError = err;
+      await waitForNextImportJobPoll();
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Import status is unavailable");
+}
+
 export function ImportExistingOrganization({ onImported, onBusyChange, disabled }: Props) {
   const [sourceMode, setSourceMode] = useState<SourceMode>("package");
   const [packageFile, setPackageFile] = useState<File | null>(null);
@@ -97,6 +119,12 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   const [preview, setPreview] = useState<CompanyPortabilityPreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resumedJobId, setResumedJobId] = useState<string | null>(null);
+  // A job the step is still watching, or could watch again, after a status
+  // request failed. While this is set the step must not accept a new import:
+  // the server would run a second job and create a second organization.
+  const [watchableJob, setWatchableJob] = useState<{ jobId: string; storageKey: string } | null>(
+    null,
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const busy = phase === "previewing" || phase === "importing";
@@ -106,17 +134,21 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
   // will reject the same package. Treat those as not-ready rather than letting
   // the user spend an import to find out.
   const previewErrors = preview?.errors ?? [];
-  // Onboarding has no chunked-transfer path, so a package past the inline
-  // request limit cannot complete here. Say so before the request, and point at
-  // the page that can do it.
-  const preflight = preview ? buildInlineImportPreflight(preview.files) : null;
+  // A GitHub source travels as a URL, and the server inlines what it fetches
+  // into a JSON body. That body is what the inline ceiling applies to, so the
+  // estimate comes from the previewed file map. A local `.zip` does not travel
+  // that way: it is uploaded compressed as multipart, where the server's zip cap
+  // applies instead. Measuring a zip against the JSON ceiling would refuse
+  // packages the upload can actually carry.
+  const preflight =
+    preview && sourceMode === "github" ? buildInlineImportPreflight(preview.files) : null;
   const blockedReason = (() => {
     if (!preview) return null;
     if (previewErrors.length > 0) {
       return "This package cannot be imported yet. Fix the problems below, then read it again.";
     }
     if (preflight?.tooLarge) {
-      return `This package is about ${formatMegabytes(preflight.estimatedBytes)}, which onboarding cannot upload. Use Settings, then Import, or the CLI for a package this size.`;
+      return `This package is about ${formatMegabytes(preflight.estimatedBytes)}, which onboarding cannot fetch. Use Settings, then Import, or the CLI for a package this size.`;
     }
     return null;
   })();
@@ -167,16 +199,34 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
    * `storageKey` is the session-storage entry that names this job, so it can be
    * cleared on the way out and so a reload resumes the same job rather than
    * starting another one.
+   *
+   * A status request that fails is retried rather than treated as a failed
+   * import: the job is still running on the server, and reporting it as finished
+   * would let the user submit the package again and create a second
+   * organization. After the retry budget the job stays stored and the step
+   * offers to keep watching that same job.
    */
   async function followJob(initialJobId: string, storageKey: string) {
     setPhase("importing");
     setError(null);
+    let jobId = initialJobId;
     try {
-      let jobId = initialJobId;
       for (;;) {
-        const status = await companiesApi.getImportJob(jobId);
+        let status: Awaited<ReturnType<typeof companiesApi.getImportJob>>;
+        try {
+          status = await withStatusRetries(() => companiesApi.getImportJob(jobId));
+        } catch {
+          // Watch the same job again rather than accepting a new one.
+          setWatchableJob({ jobId, storageKey });
+          setPhase("idle");
+          setError(
+            "Paperclip lost contact with the import. It is still running, so this step will keep watching the same import rather than start a second one.",
+          );
+          return;
+        }
         if (status.job.status === "succeeded") {
           clearStoredImportJob(storageKey);
+          setWatchableJob(null);
           const companyId = status.job.result?.companyId ?? status.job.importResult?.company.id;
           if (!companyId) throw new Error("Import finished without naming the organization.");
           const company = await readImportedCompany(companyId);
@@ -189,6 +239,7 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
         }
         if (status.job.status === "failed") {
           clearStoredImportJob(storageKey);
+          setWatchableJob(null);
           throw new Error(status.job.error?.message ?? "Import failed.");
         }
         jobId = status.job.id;
@@ -341,6 +392,25 @@ export function ImportExistingOrganization({ onImported, onBusyChange, disabled 
         <p className="text-xs text-muted-foreground">
           An import from this session is still running. Waiting for it to finish.
         </p>
+      ) : null}
+
+      {watchableJob ? (
+        <div className="flex flex-col gap-2 rounded-lg bg-muted p-3 text-sm">
+          <span>A previous import is still running on the server.</span>
+          <span className="text-muted-foreground">
+            Keep watching that import rather than starting a second one, so this instance does not
+            end up with two organizations.
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            className="self-start"
+            disabled={busy}
+            onClick={() => void followJob(watchableJob.jobId, watchableJob.storageKey)}
+          >
+            Keep watching
+          </Button>
+        </div>
       ) : null}
 
       {preview ? (
