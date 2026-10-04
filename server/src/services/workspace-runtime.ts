@@ -502,6 +502,13 @@ export async function resolveRuntimeServiceExposure(input: {
  * than resolving the full reuse identity: templates never rewrite a service
  * name, and the substrings `isPaperclipDevRuntimeService` matches survive
  * rendering, so this agrees with the per-service decision made during spawn.
+ *
+ * Deliberately does not swallow the error `resolveRuntimeServiceExposure` throws
+ * for a declared HTTPS exposure with the transport off. This runs once for the
+ * whole batch before anything spawns, so failing here rejects the batch while
+ * no process is running and no row is written. Swallowing it would push the
+ * failure into the per-service path, where an earlier service in the same batch
+ * has already started.
  */
 async function anyRuntimeServiceUsesHttpsExposure(
   services: Record<string, unknown>[],
