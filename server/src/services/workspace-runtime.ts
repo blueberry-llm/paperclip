@@ -478,7 +478,7 @@ export async function resolveRuntimeServiceExposure(input: {
     // HTTP under the same name.
     if (!transportEnabled) {
       throw new Error(
-        `Runtime service "${input.serviceName}" declares an HTTPS exposure, but the instance has remote runtime exposure turned off.`,
+        `Runtime service "${input.serviceName}" declares an HTTPS exposure, but this instance has remote runtime exposure turned off. Turn enableTailscaleRuntimeExposure back on in Settings, then Experimental, or remove the declared exposure from the service.`,
       );
     }
     const declared = resolveDeclaredRuntimeExposureConfig(expose);
@@ -508,9 +508,14 @@ export async function resolveRuntimeServiceExposure(input: {
  * whole batch before anything spawns, so failing here rejects the batch while
  * no process is running and no row is written. Swallowing it would push the
  * failure into the per-service path, where an earlier service in the same batch
- * has already started.
+ * has already started and the transaction rollback would discard the batch
+ * record that identifies it for cleanup.
+ *
+ * Exported for tests: this ordering is the difference between a rejected batch
+ * and an orphaned process, and it is not otherwise observable without spawning
+ * real processes.
  */
-async function anyRuntimeServiceUsesHttpsExposure(
+export async function anyRuntimeServiceUsesHttpsExposure(
   services: Record<string, unknown>[],
 ): Promise<boolean> {
   for (const service of services) {
@@ -518,10 +523,7 @@ async function anyRuntimeServiceUsesHttpsExposure(
       service,
       serviceName: asString(service.name, "service"),
       command: asString(service.command, ""),
-      // A declared exposure with the transport off throws. This is a batch
-      // question ("does anything in here need the HTTPS port"), so treat that
-      // service as not needing it and let the spawn path report the failure.
-    }).catch(() => null);
+    });
     if (resolved) return true;
   }
   return false;
@@ -577,7 +579,7 @@ export async function resetRuntimeServicesForTests(
   runtimeReplacementClaimsByReuseKey.clear();
   quarantinedRuntimeExposurePorts.clear();
   exposurePortPairClaims.clear();
-workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
+  workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
   remoteRuntimeExposureGate = defaultRemoteRuntimeExposureGate;
 }
 
@@ -3444,7 +3446,7 @@ export async function realizeExecutionWorkspace(input: {
       repoRoot,
       worktreePath: reusablePath,
       expectedBranchName: branchName,
-    }).catch(() => null);
+    });
     if (validation && !validation.valid && validation.reasonCode === "branch_mismatch") {
       if (requestedExistingBranch) {
         // Exact-branch mode never reconciles a mismatched checkout onto
@@ -3474,7 +3476,7 @@ export async function realizeExecutionWorkspace(input: {
         repoRoot,
         worktreePath: reusablePath,
         expectedBranchName: effectiveBranchName,
-      }).catch(() => null);
+      });
       return {
         validation: nextValidation,
         branchName: effectiveBranchName,

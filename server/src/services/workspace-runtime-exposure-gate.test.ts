@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrokerClient } from "./runtime-exposure/broker-client.js";
 import {
+  anyRuntimeServiceUsesHttpsExposure,
   resetRuntimeServicesForTests,
   resolveRuntimeServiceExposure,
   setRemoteRuntimeExposureGate,
@@ -96,8 +97,39 @@ describe("remote runtime exposure gate", () => {
     setRemoteRuntimeExposureGate(async () => false);
 
     await expect(resolveRuntimeServiceExposure(declaredOptIn)).rejects.toThrow(
-      /remote runtime exposure turned off/i,
+      /enableTailscaleRuntimeExposure/,
     );
+  });
+
+  it("rejects a whole batch before anything spawns", async () => {
+    // The ordering matters more than the message. If the batch pre-check
+    // swallowed this failure, the first service would spawn, the second would
+    // throw inside the transaction, and the rollback would discard the batch
+    // record that cleanup needs — leaving a process with no row to stop it.
+    setRemoteRuntimeExposureGate(async () => false);
+
+    const batch = [
+      { name: "paperclip-dev", command: "pnpm dev:once" },
+      {
+        name: "paperclip-preview",
+        command: "pnpm preview",
+        expose: { type: "tailscale_https", hostname: "auto", publicPort: "same" },
+      },
+    ];
+
+    await expect(anyRuntimeServiceUsesHttpsExposure(batch)).rejects.toThrow(
+      /enableTailscaleRuntimeExposure/,
+    );
+  });
+
+  it("reports a batch that needs the HTTPS port when the transport is on", async () => {
+    setRemoteRuntimeExposureGate(async () => true);
+
+    const needsHttps = await anyRuntimeServiceUsesHttpsExposure([
+      { name: "paperclip-dev", command: "pnpm dev:once" },
+    ]);
+
+    expect(needsHttps).toBe(true);
   });
 
   it("still honors a service's own opt-out with the transport on", async () => {
