@@ -457,7 +457,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         importJobStorageKey("onboarding", "package"),
         JSON.stringify({ jobId: "job-pending", pauseAutomations: true }),
       );
-mockCompaniesApi.getImportJob.mockResolvedValue({
+      mockCompaniesApi.getImportJob.mockResolvedValue({
         // Still running: the step must stay put rather than offer the create form.
         job: { id: "job-pending", status: "running" },
       });
