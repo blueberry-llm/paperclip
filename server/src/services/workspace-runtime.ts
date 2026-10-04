@@ -363,6 +363,25 @@ function defaultWorkspaceRuntimeExposureDeps(): WorkspaceRuntimeExposureDeps {
 
 let workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
 
+/**
+ * Instance-level gate for the managed runtime exposure transport.
+ *
+ * Backed by the `enableTailscaleRuntimeExposure` experimental flag. The gate
+ * sits in front of the transport choice rather than in front of the Tailscale
+ * broker specifically, so a hosted relay transport can replace the broker
+ * behind the same flag without a second settings surface.
+ */
+let remoteRuntimeExposureGate: () => Promise<boolean> = defaultRemoteRuntimeExposureGate;
+
+function defaultRemoteRuntimeExposureGate(): Promise<boolean> {
+  return Promise.resolve(true);
+}
+
+/** Wires the instance experimental flag into managed runtime exposure. */
+export function setRemoteRuntimeExposureGate(gate: () => Promise<boolean>) {
+  remoteRuntimeExposureGate = gate;
+}
+
 /** Test-only seam; resetRuntimeServicesForTests restores production defaults. */
 export function setWorkspaceRuntimeExposureDepsForTests(deps: WorkspaceRuntimeExposureDeps) {
   workspaceRuntimeExposureDeps = deps;
@@ -438,6 +457,10 @@ async function resolveRuntimeServiceExposure(input: {
   const expose = parseObject(input.service.expose);
   const intent = readRuntimeExposureIntent(expose);
   if (intent === "disabled") return null;
+  // Instance kill switch for the managed exposure transport. It gates the
+  // transport, not the broker, so a hosted relay transport stays substitutable
+  // behind the same flag.
+  if (!(await remoteRuntimeExposureGate().catch(() => true))) return null;
   // An explicit opt-in is honored verbatim and is never gated on broker
   // availability: the operator asked for HTTPS, so a missing broker must fail
   // the start rather than silently downgrade it to HTTP.
@@ -527,7 +550,8 @@ export async function resetRuntimeServicesForTests(
   runtimeReplacementClaimsByReuseKey.clear();
   quarantinedRuntimeExposurePorts.clear();
   exposurePortPairClaims.clear();
-  workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
+workspaceRuntimeExposureDeps = defaultWorkspaceRuntimeExposureDeps();
+  remoteRuntimeExposureGate = defaultRemoteRuntimeExposureGate;
 }
 
 function stableStringify(value: unknown): string {
