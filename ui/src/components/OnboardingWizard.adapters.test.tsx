@@ -73,11 +73,11 @@ vi.mock("../adapters/metadata", () => ({ isVisualAdapterChoice: () => true }));
 // The real display registry, not a stub. `recommended` is what puts a tile in
 // the onboarding source row, so a stub that hardcodes `recommended: false` would
 // let a change to the real recommendation ship with a green test.
-vi.mock("../adapters/adapter-display-registry", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../adapters/adapter-display-registry")>();
-  return actual;
-});
+// The display registry is deliberately NOT mocked here. `recommended` is what
+// puts a tile in the onboarding source row, and a stub that hardcoded
+// `recommended: false` would let a change to the real recommendation ship with a
+// green test. `OnboardingWizard.test.tsx` keeps its own two-source fixture for
+// the tests that are about tile labels rather than about the recommendation set.
 vi.mock("../adapters/use-disabled-adapters", () => ({
   useDisabledAdaptersSync: () => mockAdapterRegistry.disabled,
   useAdapterRegistryLoaded: () => mockAdapterRegistry.loaded,
@@ -189,7 +189,7 @@ describe("OnboardingWizard adapter selection", () => {
       JSON.stringify({ step: 4, adapterType: "claude_local" }),
     );
 
-    const { container, root } = await mount();
+    const { root } = await mount();
 
     const recommendedRow = document.body.querySelector('[aria-label="Model source"]');
     expect(recommendedRow).not.toBeNull();
