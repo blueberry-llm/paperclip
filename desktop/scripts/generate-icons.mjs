@@ -189,9 +189,12 @@ for (const size of [32, 128, 256]) {
 }
 // Tauri's own icon templates emit this name for the retina slot.
 writeFileSync(join(iconDir, "128x128@2x.png"), pngBySize.get(256));
+// Keep the ico small. Every entry here is an uncompressed 32-bit DIB, so a
+// 256px entry alone costs 256 KB, and Windows scales a 48px icon perfectly well
+// for the shell's window and taskbar. The PNG set carries the large sizes.
 writeFileSync(
   join(iconDir, "icon.ico"),
-  encodeIco([16, 32, 48, 256].map((size) => ({ size, pixels: drawIcon(size) }))),
+  encodeIco([16, 32, 48].map((size) => ({ size, pixels: drawIcon(size) }))),
 );
 writeFileSync(join(iconDir, "icon.icns"), encodeIcns([
   { type: "ic07", png: pngBySize.get(128) },
