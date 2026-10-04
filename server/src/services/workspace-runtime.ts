@@ -446,10 +446,14 @@ export type ResolvedRuntimeServiceExposure = {
 /**
  * Resolve the exposure config for one runtime service start.
  *
- * Precedence: deliberate opt-out → explicit opt-in → automatic default for
- * eligible managed runtimes → none.
+ * Precedence: deliberate opt-out → instance kill switch → explicit opt-in →
+ * automatic default for eligible managed runtimes → none.
+ *
+ * Exported for tests: the gate behavior is the contract an operator relies on
+ * when they turn exposure off, and it is otherwise only reachable through a full
+ * spawn, which needs real processes and a real broker.
  */
-async function resolveRuntimeServiceExposure(input: {
+export async function resolveRuntimeServiceExposure(input: {
   service: Record<string, unknown>;
   serviceName: string;
   command: string | null;
@@ -460,14 +464,27 @@ async function resolveRuntimeServiceExposure(input: {
   // Instance kill switch for the managed exposure transport. It gates the
   // transport, not the broker, so a hosted relay transport stays substitutable
   // behind the same flag.
-  if (!(await remoteRuntimeExposureGate().catch(() => true))) return null;
+  //
+  // Fail closed. A settings read that fails is not consent to publish a
+  // listener, and an operator who turned this off must not get exposure back
+  // because the database was briefly unreachable.
+  const transportEnabled = await remoteRuntimeExposureGate().catch(() => false);
   // An explicit opt-in is honored verbatim and is never gated on broker
   // availability: the operator asked for HTTPS, so a missing broker must fail
   // the start rather than silently downgrade it to HTTP.
   if (intent === "enabled") {
+    // Same reasoning applies to the instance kill switch: a service that asked
+    // for HTTPS and cannot get it must fail loudly rather than come up on plain
+    // HTTP under the same name.
+    if (!transportEnabled) {
+      throw new Error(
+        `Runtime service "${input.serviceName}" declares an HTTPS exposure, but the instance has remote runtime exposure turned off.`,
+      );
+    }
     const declared = resolveDeclaredRuntimeExposureConfig(expose);
     return declared ? { config: declared, origin: "declared" } : null;
   }
+  if (!transportEnabled) return null;
 
   const mode = resolveManagedRuntimeHttpsMode();
   if (mode === "off") return null;
@@ -494,7 +511,10 @@ async function anyRuntimeServiceUsesHttpsExposure(
       service,
       serviceName: asString(service.name, "service"),
       command: asString(service.command, ""),
-    });
+      // A declared exposure with the transport off throws. This is a batch
+      // question ("does anything in here need the HTTPS port"), so treat that
+      // service as not needing it and let the spawn path report the failure.
+    }).catch(() => null);
     if (resolved) return true;
   }
   return false;
@@ -8299,7 +8319,11 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
     );
 
   // Backfill inputs, resolved once per startup rather than per row.
-  const httpsMode = resolveManagedRuntimeHttpsMode();
+  // The instance kill switch is read here for the same reason it is read per
+  // start: backfilling a service onto HTTPS that then refuses to come back with
+  // HTTPS would stop and restart a healthy runtime for nothing.
+  const transportEnabled = await remoteRuntimeExposureGate().catch(() => false);
+  const httpsMode = transportEnabled ? resolveManagedRuntimeHttpsMode() : "off";
   const brokerAvailable = httpsMode === "off"
     ? false
     : await workspaceRuntimeExposureDeps.isBrokerAvailable().catch(() => false);

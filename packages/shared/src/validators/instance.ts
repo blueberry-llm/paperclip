@@ -84,8 +84,8 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableSandboxDuplexBridge: z.boolean().default(false),
   // Experimental first-class remote access for managed runtimes. On by default
   // because the Tailscale HTTPS broker is the only remote transport shipped
-  // today. Off keeps runtimes on loopback-only listeners. The transport choice
-  // stays behind this flag so a hosted relay (t3code-style) can become the
+  // today. Off stops Paperclip from publishing any runtime to a tailnet. The
+  // transport choice stays behind this flag so a hosted relay can become the
   // default transport without a second settings surface.
   enableTailscaleRuntimeExposure: z.boolean().default(true),
   // Deprecated compatibility key. Runner ingress follows enableNativeRunner;

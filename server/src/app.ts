@@ -944,6 +944,14 @@ export async function createApp(
       { toolGateway },
     ),
   );
+  // Instance experimental flag gates the managed runtime exposure transport.
+  // Wired here, outside any UI-mode branch, because the supervisor reads this
+  // gate in every mode and must not fall back to its allow-by-default value in
+  // a vite-dev or API-only run.
+  setRemoteRuntimeExposureGate(
+    async () =>
+      (await instanceSettingsService(db).getExperimental()).enableTailscaleRuntimeExposure !== false,
+  );
   api.use(
     adapterRoutes({
       getNativeRunnerEnabled: async () =>
@@ -1029,14 +1037,6 @@ export async function createApp(
     } else {
       console.warn("[paperclip] UI dist not found; running in API-only mode");
     }
-    // Instance experimental flag gates the managed runtime exposure transport.
-    // Wiring happens here because the flag lives in instance settings and the
-    // managed-runtime supervisor reads this gate before it picks a transport.
-    setRemoteRuntimeExposureGate(
-      async () =>
-        (await instanceSettingsService(db).getExperimental()).enableTailscaleRuntimeExposure !==
-        false,
-    );
     if (process.env.PAPERCLIP_MANAGED_RUNTIME_EXPOSURE === "tailscale_https") {
       // The managed-runtime supervisor waits for the app port AND its derived
       // Vite HMR companion port to bind before publishing the service. Static

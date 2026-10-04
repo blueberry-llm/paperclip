@@ -6,7 +6,8 @@ same-number HTTPS-to-loopback listeners for managed branch runtimes.
 Tailscale-based runtime exposure is a **first-class, still experimental**
 Paperclip feature, not an add-on plugin. It is gated by the instance
 experimental flag `enableTailscaleRuntimeExposure` (Settings → Experimental,
-on by default). Turning it off keeps every managed runtime loopback-only. The
+on by default). Turning it off stops Paperclip from publishing any runtime to a
+tailnet. The
 flag gates the *transport* rather than the Tailscale broker specifically, so a
 hosted relay transport can replace the broker later without introducing a
 second settings surface.

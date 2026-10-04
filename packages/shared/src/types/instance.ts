@@ -128,10 +128,11 @@ export interface InstanceExperimentalSettings {
   enableSandboxDuplexBridge: boolean;
   /**
    * Experimental first-class remote access for managed runtimes. Default on:
-   * the Tailscale HTTPS broker is the only remote transport today. Off keeps
-   * runtimes on loopback-only listeners. The transport choice stays behind this
-   * flag so a hosted relay can replace the broker without a second settings
-   * surface.
+   * the Tailscale HTTPS broker is the only remote transport today. Off stops
+   * Paperclip from publishing any runtime to a tailnet, and a service that
+   * declares an explicit HTTPS exposure then fails to start. The transport
+   * choice stays behind this flag so a hosted relay can replace the broker
+   * without a second settings surface.
    */
   enableTailscaleRuntimeExposure: boolean;
   /**
