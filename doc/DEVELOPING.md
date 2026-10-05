@@ -548,8 +548,11 @@ not depend on filesystem timestamp precision. Direct `tsc` builds that produce
 identical output reuse the marker. Changed or partial output is rebuilt once
 before later startups reuse the completed build.
 
-Claude uses `ANTHROPIC_API_KEY`; Codex uses `OPENAI_API_KEY`; OpenCode uses
-`OPENROUTER_API_KEY` and requires an `openrouter/...` model. `--api-key-env`
+Claude uses `ANTHROPIC_API_KEY`; Codex uses `OPENAI_API_KEY`. OpenCode stores no
+credential: it uses the OpenCode CLI's own login, so any provider that CLI is
+signed in to works and the model may be any `provider/model` it reports. Set
+`OPENROUTER_API_KEY` yourself to drive an `openrouter/...` model.
+`--api-key-env`
 can name a different source variable while the agent still receives the
 canonical variable. `--api-key <value>` is also supported and is mutually
 exclusive with `--api-key-env`; Paperclip redacts it from its own output, but

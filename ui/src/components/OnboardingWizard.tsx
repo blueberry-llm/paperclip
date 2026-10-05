@@ -3,7 +3,7 @@ import { LocalProviderLoginInstructions } from "./AdapterLoginChrome";
 import { useLocalAiLogin } from "./ai-connections/useLocalAiLogin";
 import { aiConnectionsApi } from "@/api/ai-connections";
 import { aiProviderForAdapter } from "./ai-connections/AiConnectionField";
-import type { AiConnectionBinding } from "@paperclipai/shared";
+import { usesCliNativeAuth, type AiConnectionBinding } from "@paperclipai/shared";
 import { storeProviderApiKey } from "../lib/provider-credential";
 import { SavedProviderKeySelect, useSavedProviderKeys } from "./onboarding/SavedProviderKeySelect";
 import { randomAgentAppearance, resolveAgentAppearance, agentAppearanceSchema } from "@paperclipai/shared";
@@ -732,7 +732,7 @@ function OnboardingWizardInner({
   const selectedApiKey = savedKeys.options.find((option) => option.id === selectedApiKeyId);
   const credentialMode = credentialModeChoice ?? (
     (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
-      ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
+      ? "subscription" : savedKeys.options.length ? "api" : "subscription"
   );
   const [createdCompanyPrefix, setCreatedCompanyPrefix] = useState<
     string | null
@@ -784,6 +784,11 @@ function OnboardingWizardInner({
   const apiKeySecretRef = useRef<{ key: string; companyId: string; envKey: string; binding?: Awaited<ReturnType<typeof storeProviderApiKey>>["binding"]; aiConnection?: AiConnectionBinding } | null>(null);
   const managedSubscriptionRef = useRef<{ companyId: string; binding: AiConnectionBinding } | null>(null);
   const managedProvider = aiProviderForAdapter(adapterType);
+  // OpenCode authenticates through its own CLI login, so this step has no key to
+  // collect and no managed connection to create. Everything below that branches
+  // on `managedProvider` already goes quiet for it; this flag additionally keeps
+  // the wizard from storing a key under a placeholder env var name.
+  const cliNativeAuth = usesCliNativeAuth(adapterType);
   function managedBindingForStep(): AiConnectionBinding | undefined {
     if (credentialMode === "api") return selectedApiKey?.aiConnection ?? (
       !selectedApiKey && apiKeySecretRef.current?.companyId === createdCompanyId && apiKeySecretRef.current.envKey === apiKeyEnvKeyFor(adapterType)
@@ -1248,7 +1253,7 @@ function OnboardingWizardInner({
   const connectProgress = adapterEnvLoading ? "Testing connection…" : loading ? "Connecting…" : null;
   const hasSavedSubscription = Boolean(savedSubscription || savedKeys.storedLogin.data ||
     (credentialMode !== "api" && managedBindingForStep()));
-  const connectHasCard = credentialMode === "api" || connectStepNeedsLogin || connectStepHasNoSandbox || Boolean(connectProgress);
+  const connectHasCard = cliNativeAuth || credentialMode === "api" || connectStepNeedsLogin || connectStepHasNoSandbox || Boolean(connectProgress);
   const connectCardLive =
     connectHasCard &&
     (connectPhase === "loading" ||
@@ -1328,7 +1333,7 @@ function OnboardingWizardInner({
         // opens.
         () =>
           setConnectPhase(
-            credentialMode === "api" || !connectStepNeedsLogin ? "ready" : "loading",
+            credentialMode === "api" || cliNativeAuth || !connectStepNeedsLogin ? "ready" : "loading",
           ),
         beatDelay(SOURCE_COLLAPSE_MS),
       );
@@ -1406,7 +1411,8 @@ function OnboardingWizardInner({
                 label: "Connect",
                 icon: "arrow",
                 disabled:
-                  !connectStepReady || (credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
+                  !connectStepReady ||
+                  (!cliNativeAuth && credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
             // it has been answered the button has nothing to do.
@@ -1492,7 +1498,7 @@ function OnboardingWizardInner({
    */
   const canvasOpen =
     sourceSelected &&
-    (credentialMode === "api" || connectCardSpace || connectStepHasNoSandbox);
+    (credentialMode === "api" || cliNativeAuth || connectCardSpace || connectStepHasNoSandbox);
 
   // The default (or a saved) adapterType can name an adapter the server has
   // since disabled — e.g. a cloud sandbox registry without claude_local. The
@@ -1889,7 +1895,7 @@ function OnboardingWizardInner({
     // present. If storing failed this stays false, and the right outcome is a
     // configuration with no credential — which the hire then blocks on — rather
     // than one that quietly falls back to embedding the value.
-    if (!managedBindingForStep() && credentialMode === "api" && (bindApiKey || selectedApiKey)) {
+    if (!cliNativeAuth && !managedBindingForStep() && credentialMode === "api" && (bindApiKey || selectedApiKey)) {
       const env =
         typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
           ? { ...(config.env as Record<string, unknown>) }
@@ -2134,7 +2140,7 @@ function OnboardingWizardInner({
       // hire describe it the same way — as a reference. A failure here stops the
       // hire rather than falling through to a configuration with no credential.
       let apiKeyStored = false;
-      if (credentialMode === "api" && !selectedApiKey && apiKey.trim()) {
+      if (credentialMode === "api" && !cliNativeAuth && !selectedApiKey && apiKey.trim()) {
         apiKeyStored = await storeApiKeyUserSecret(createdCompanyId);
         if (!apiKeyStored || !isCurrent()) return;
       }
@@ -2800,7 +2806,11 @@ function OnboardingWizardInner({
                       transition={{ opacity: SOURCE_LINK_EXIT, height: MAKE_ROOM }}
                     >
                       <div className="-ml-3 mt-1">
-                        <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />
+                        {/* No toggle for a CLI-authenticated adapter: there is no
+                            provider key to switch to a subscription from, and
+                            offering one led to a sign-in the server cannot
+                            perform for OpenCode. */}
+                        {!cliNativeAuth && <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />}
                         {savedKeys.options.length > 0 && <p className="px-3 text-sm text-muted-foreground">{savedKeys.options.length} saved API {savedKeys.options.length === 1 ? "key available" : "keys available"}.</p>}
                         {credentialMode === "subscription" && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
                       </div>
@@ -2848,7 +2858,7 @@ function OnboardingWizardInner({
                         <Loader2 className="size-4 animate-spin" />
                         {connectProgress}
                       </p>
-                    ) : credentialMode === "api" ? (
+                    ) : credentialMode === "api" && !cliNativeAuth ? (
                       <OnboardingLoginCard
                         instruction={savedKeys.options.length ? "Choose a saved API key or enter a new one" : `Provide your ${
                           CONNECT_SOURCE_NAMES[adapterType] ?? adapterType
@@ -2873,6 +2883,22 @@ function OnboardingWizardInner({
                           }}
                           onSubmit={() => handleConnectStepPrimary()}
                         />}
+                      </OnboardingLoginCard>
+                    ) : cliNativeAuth ? (
+                      /* OpenCode holds its own credential, so there is nothing to
+                         collect here and nothing to verify against a provider.
+                         The connect test below is the real check: it runs the
+                         adapter, which fails with an auth error when the CLI is
+                         not signed in. Naming the command beats offering a key
+                         that Paperclip would then hand to the wrong vendor. */
+                      <OnboardingLoginCard instruction="OpenCode signs in with its own CLI account">
+                        <p className="text-sm text-muted-foreground">
+                          Run <span className="font-mono">opencode auth login</span> on the machine
+                          that runs this agent, then continue. Paperclip uses that login and
+                          stores no key for OpenCode. To use an OpenRouter model instead, set{" "}
+                          <span className="font-mono">OPENROUTER_API_KEY</span> in the agent's
+                          environment variables.
+                        </p>
                       </OnboardingLoginCard>
                     ) : connectStepNeedsLogin &&
                       createdCompanyId &&
@@ -3070,11 +3096,20 @@ function OnboardingWizardInner({
                             Prompt:{" "}
                             <span className="font-mono">Respond with hello.</span>
                           </p>
-                          {adapterType === "cursor" ||
+                          {adapterType === "opencode_local" ? (
+                            /* OpenCode holds its own credential. Naming an env var
+                               here sent people to set OPENAI_API_KEY, which the
+                               Zen provider never reads. */
+                            <p className="text-muted-foreground">
+                              If auth fails, run{" "}
+                              <span className="font-mono">opencode auth login</span> on the
+                              machine that runs this agent. Paperclip stores no OpenCode
+                              key, so there is no env var to set.
+                            </p>
+                          ) : adapterType === "cursor" ||
                           adapterType === "codex_local" ||
                           adapterType === "gemini_local" ||
-                          adapterType === "kimi_local" ||
-                          adapterType === "opencode_local" ? (
+                          adapterType === "kimi_local" ? (
                             <p className="text-muted-foreground">
                               If auth fails, set{" "}
                               <span className="font-mono">
@@ -3094,9 +3129,7 @@ function OnboardingWizardInner({
                                     ? "codex login"
                                     : adapterType === "gemini_local"
                                       ? "gemini auth"
-                                      : adapterType === "kimi_local"
-                                        ? "kimi login"
-                                      : "opencode auth login"}
+                                      : "kimi login"}
                               </span>
                               .
                             </p>

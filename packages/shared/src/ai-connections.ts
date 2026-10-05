@@ -108,6 +108,27 @@ export const AI_CONNECTION_CAPABILITIES: Record<
     },
   },
 };
+/**
+ * Adapters whose provider credential is the CLI's own login, not a credential
+ * Paperclip injects.
+ *
+ * `opencode_local` runs the OpenCode CLI, which authenticates against its own
+ * on-disk auth store. Paperclip must not invent a managed connection for it: the
+ * only provider this table can inject for OpenCode is OpenRouter, which is a
+ * different vendor from OpenCode Zen and rejects a Zen key. That produced an
+ * onboarding step that offered two sign-in methods, neither of which could
+ * authenticate an OpenCode Zen key.
+ *
+ * The OpenRouter pairing above stays supported and is unchanged: an OpenRouter
+ * key still drives an `openrouter/...` model. It is opt-in through the
+ * adapter's environment variables, never a default Paperclip attaches.
+ */
+export const CLI_AUTHENTICATED_ADAPTERS = ["opencode_local"] as const;
+
+export function usesCliNativeAuth(adapterType: string): boolean {
+  return (CLI_AUTHENTICATED_ADAPTERS as readonly string[]).includes(adapterType);
+}
+
 export function isAiConnectionCompatible(
   requirement: AiConnectionMetadata | AiConnectionBinding,
   adapterType: string,

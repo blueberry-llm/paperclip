@@ -23,6 +23,13 @@ The shared `AI_CONNECTION_CAPABILITIES` contract defines these combinations:
 | OpenRouter | API key | OpenCode, with an `openrouter/` model |
 | Grok / xAI | Grok subscription or xAI API key | Grok |
 
+OpenCode is the exception to this table. It authenticates through the OpenCode
+CLI's own login, so Paperclip stores no key for it and the Connections surface
+does not appear on an OpenCode agent. An OpenRouter key still works for an
+OpenCode agent that runs an `openrouter/` model, but it is opt-in through the
+adapter's environment variables (`OPENROUTER_API_KEY`) rather than a connection
+Paperclip attaches. See [`usesCliNativeAuth`](../../packages/shared/src/ai-connections.ts).
+
 Native runner supports the corresponding existing Codex, OpenCode, and Claude
 ACP profiles. Connections creation and reconnect mount `AgentProviderConnection`,
 the same provider tiles, method controls, API entry, and `AdapterLoginPanel` used

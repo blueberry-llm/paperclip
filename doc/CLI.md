@@ -192,7 +192,7 @@ Harness configuration:
 | --- | --- | --- | --- |
 | `claude` | `claude_local` | `ANTHROPIC_API_KEY` | Optional; omitted uses the adapter default |
 | `codex` | `codex_local` | `OPENAI_API_KEY` | Optional; omitted uses the adapter default |
-| `opencode` | `opencode_local` | `OPENROUTER_API_KEY` | Required and must begin with `openrouter/` |
+| `opencode` | `opencode_local` | none; the OpenCode CLI's own login is used | Required and must begin with `openrouter/` for the OpenRouter credential, or any provider the CLI is signed in to |
 
 OpenCode model references retain their complete path, including additional
 slashes:

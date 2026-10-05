@@ -105,6 +105,11 @@ Operational fields:
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:
+- OpenCode holds its own credential. Paperclip stores no provider key for this
+  adapter and attaches no AI connection, so authenticate on the machine that
+  runs the agent (for example \`opencode auth login\`) and any provider/model that
+  login exposes will work. To pin the run to an OpenRouter account instead, set
+  OPENROUTER_API_KEY in \`env\` yourself.
 - OpenCode supports multiple providers and models. Use \
   \`opencode models\` to list available options in provider/model format.
 - Paperclip requires an explicit \`model\` value for \`opencode_local\` agents.

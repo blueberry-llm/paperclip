@@ -26,11 +26,16 @@ import {
 export function aiProviderForAdapter(
   adapterType: string,
 ): AiProvider | undefined {
+  // `opencode_local` is deliberately absent. It authenticates through the
+  // OpenCode CLI's own login, so Paperclip has no key to store and no provider
+  // to verify one against; mapping it to OpenRouter sent OpenCode Zen keys to
+  // openrouter.ai, which rejected them. An OpenRouter key remains usable for an
+  // `openrouter/...` model through the adapter's environment variables. See
+  // `usesCliNativeAuth` in @paperclipai/shared.
   return (
     {
       claude_local: "anthropic",
       codex_local: "openai",
-      opencode_local: "openrouter",
       grok_local: "xai",
     } as Record<string, AiProvider>
   )[adapterType];

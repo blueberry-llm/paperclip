@@ -524,46 +524,34 @@ describe("New agent setup", () => {
       expect(secrets.create).toHaveBeenCalledTimes(1);
     },
   );
-  it("connects OpenRouter before testing and hiring OpenCode without copying credentials into the agent", async () => {
+  it("hires OpenCode with no managed connection so the CLI's own login is used", async () => {
+    // OpenCode authenticates through its own CLI login. This setup used to
+    // pre-seed an OpenRouter connection, so the only way to finish was to
+    // supply an OpenRouter key — and an OpenCode Zen key was then verified
+    // against openrouter.ai and rejected. The agent now goes out with no
+    // `aiConnection` at all, which is the state the adapter needs.
     await render("opencode_local");
-    const model = "openrouter/anthropic/claude-sonnet-4.6";
+    const model = "opencode/big-pickle";
     await fill("Model", model);
-    await click("Connect another account");
-    const dialog = document.querySelector('[role="dialog"]')!;
-    expect(dialog).toBeTruthy();
-    expect(api.hire).not.toHaveBeenCalled();
-    expect(api.testEnvironment).not.toHaveBeenCalled();
-    const input = dialog.querySelector('[aria-label="API key"]') as HTMLInputElement;
-    expect(input).toBeTruthy();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "example-test-secret");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const connectButton = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Connect")!;
-    expect(connectButton.disabled).toBe(false);
-    await act(async () => connectButton.click());
-    await settle();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(managedApi.setDefault).toHaveBeenCalledWith("company-1", "managed-grant");
-    expect(managedApi.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
-      provider: "openrouter", method: "api_key", apiKey: "example-test-secret",
-    }));
-    const binding = { provider: "openrouter", method: "api_key", mode: "responsible_user" };
+    expect(
+      document.body.textContent,
+      "OpenCode has no managed account to connect",
+    ).not.toContain("Connect another account");
     await click("Run test");
-    expect(api.testEnvironment.mock.calls[0][2]).toEqual(expect.objectContaining({
-      aiConnection: binding, testCredentials: {},
-      adapterConfig: expect.objectContaining({ model }),
-    }));
+    const tested = api.testEnvironment.mock.calls[0][2];
+    expect(tested.adapterConfig).toEqual(expect.objectContaining({ model }));
+    expect(tested.aiConnection).toBeUndefined();
     await click("Finish setup");
-    expect(api.hire.mock.calls[0][1]).toEqual(expect.objectContaining({
-      adapterType: "opencode_local",
-      runtimeConfig: expect.objectContaining({ aiConnection: binding }),
-      adapterConfig: expect.objectContaining({ model }),
-    }));
-    expect(managedApi.create).toHaveBeenCalledTimes(1);
+    const hired = api.hire.mock.calls[0][1];
+    expect(hired).toEqual(
+      expect.objectContaining({
+        adapterType: "opencode_local",
+        adapterConfig: expect.objectContaining({ model }),
+      }),
+    );
+    expect(hired.runtimeConfig?.aiConnection).toBeUndefined();
+    expect(managedApi.create).not.toHaveBeenCalled();
     expect(secrets.create).not.toHaveBeenCalled();
-    expect(JSON.stringify(api.testEnvironment.mock.calls)).not.toContain("example-test-secret");
-    expect(JSON.stringify(api.hire.mock.calls)).not.toContain("example-test-secret");
   });
   it.each(["codex", "claude", "opencode"])(
     "uses the correct native %s runner",

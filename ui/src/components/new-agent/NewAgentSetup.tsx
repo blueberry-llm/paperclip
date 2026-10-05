@@ -148,11 +148,12 @@ function Setup({
   const [providerBinding, setProviderBinding] = useState<EnvBinding | null>(
     null,
   );
-  const [runtimeAiBinding, setRuntimeAiBinding] = useState<AiConnectionBinding | undefined>(() =>
-    brandType === "opencode_local"
-      ? { provider: "openrouter", method: "api_key", mode: "responsible_user" }
-      : undefined,
-  );
+  // No adapter gets a managed connection by default. `opencode_local` used to be
+  // pre-seeded with OpenRouter here, which made an OpenCode agent unusable
+  // without an OpenRouter key even though the OpenCode CLI authenticates on its
+  // own. `aiProviderForAdapter` no longer maps OpenCode to a provider, so this
+  // starts empty and stays empty until someone connects an account on purpose.
+  const [runtimeAiBinding, setRuntimeAiBinding] = useState<AiConnectionBinding | undefined>(undefined);
   const [connection, setConnection] = useState<ProviderConnection | null>(null);
   const aiBinding = runtimeAiBinding ?? connection?.aiConnection;
   const [repository, setRepository] = useState("");

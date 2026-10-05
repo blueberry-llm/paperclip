@@ -174,6 +174,50 @@ describe("OnboardingWizard adapter selection", () => {
     });
   });
 
+  it("asks OpenCode for a CLI login instead of an API key", async () => {
+    // OpenCode holds its own credential. This step used to ask for a key and
+    // store it as an OpenRouter connection, so an OpenCode Zen key was verified
+    // against openrouter.ai and rejected. It must now name the CLI login and
+    // offer no key field at all.
+    mockAdapterRegistry.list = [
+      { type: "claude_local" },
+      { type: "codex_local" },
+      { type: "opencode_local" },
+    ];
+    window.localStorage.setItem(
+      ONBOARDING_STORAGE_KEY,
+      JSON.stringify({ step: 4, adapterType: "opencode_local" }),
+    );
+
+    const { root } = await mount();
+
+    // The card lives behind the source row: pressing the tile is what opens the
+    // canvas, so the assertion below is about the state a user actually reaches.
+    const openCodeTile = [...document.body.querySelectorAll<HTMLButtonElement>("button[aria-checked]")].find(
+      (tile) => tile.textContent?.includes("OpenCode"),
+    );
+    expect(openCodeTile).toBeTruthy();
+    await act(async () => {
+      openCodeTile!.click();
+    });
+    await flushReact();
+
+    expect(document.body.textContent).toContain("opencode auth login");
+    const apiKeyFields = [...document.body.querySelectorAll("input")].filter(
+      (input) =>
+        input.getAttribute("placeholder") === "Enter API key here" ||
+        input.getAttribute("aria-label") === "API key",
+    );
+    expect(
+      apiKeyFields,
+      "OpenCode has no provider key for Paperclip to store",
+    ).toHaveLength(0);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("offers OpenCode in the recommended model source row", async () => {
     // The connect step renders `recommendedAdapters` as its source tiles, so
     // this asserts the real registry puts OpenCode in that row, not in the
